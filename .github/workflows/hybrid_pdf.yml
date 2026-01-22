@@ -2,11 +2,11 @@ name: CustomCrops KB Auto-Update
 
 on:
   schedule:
-    # 每天北京时间上午 10:00 运行一次 (UTC 02:00)
+    # 每天北京时间上午 10:00 运行一次
     - cron: '0 2 * * *'
-  workflow_dispatch: # 允许你在 GitHub 页面上点击按钮手动触发
+  workflow_dispatch: 
 
-# 赋予 Action 写入仓库的权限
+# 必须确保有写入权限
 permissions:
   contents: write
 
@@ -15,41 +15,39 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      # 1. 拉取仓库代码
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 2. 安装 Go 环境 (使用最新的 1.24 以支持 colly/v2)
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
           cache: true
 
-      # 3. 自动初始化环境 (防止 go.mod/go.sum 缺失或损坏)
       - name: Initialize Environment
         run: |
           if [ ! -f go.mod ]; then
             go mod init customcrops-scraper
           fi
-          # 这一步会自动下载依赖并生成/更新 go.sum
+          # 确保依赖库包括 goquery 等被正确拉取
           go mod tidy
 
-      # 4. 运行爬虫程序
       - name: Run Scraper
         run: |
-          # 确保输出目录存在
           mkdir -p knowledge_base
-          # 清理旧文件，保证知识库永远是最新且无死链的
+          # 运行前清理，确保知识库没有过时的旧页面
           rm -rf knowledge_base/*.md
-          # 运行 main.go
           go run main.go
 
-      # 5. 将更新后的 Markdown 文件自动提交回仓库
       - name: Deploy to Repository
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "docs(auto): sync CustomCrops documentation to KB"
+          commit_message: "docs(auto): sync CustomCrops wiki with annotated codeblocks"
+          # 关键：确保把代码生成的 md 和 自动整理的 mod/sum 都存回去
           file_pattern: 'knowledge_base/*.md go.mod go.sum'
-          # 如果知识库没有变化，Action 不会报错
+          # 设置提交者，方便在 Commit 记录中识别是机器人操作
+          commit_user_name: "KnowledgeBase-Bot"
+          commit_user_email: "actions@github.com"
+          commit_author: "KnowledgeBase-Bot <actions@github.com>"
+          # 如果内容没变化，不报错直接退出
           skip_dirty_check: false
