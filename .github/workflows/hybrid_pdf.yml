@@ -2,18 +2,15 @@ name: CustomCrops KB Auto-Update
 
 on:
   schedule:
-    # 每天北京时间上午 10:00 运行一次
     - cron: '0 2 * * *'
   workflow_dispatch: 
 
-# 必须确保有写入权限
 permissions:
   contents: write
 
 jobs:
   build-and-scrape:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -22,32 +19,34 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          cache: true
+          # 关键修改：暂时关闭自动缓存，等仓库里有了 go.sum 再开启
+          cache: false 
 
-      - name: Initialize Environment
+      - name: Initialize and Run
         run: |
-          if [ ! -f go.mod ]; then
-            go mod init customcrops-scraper
-          fi
-          # 确保依赖库包括 goquery 等被正确拉取
+          # 强制重新初始化
+          rm -f go.mod go.sum
+          go mod init customcrops-scraper
+          
+          # 下载所有必要的依赖
+          go get github.com/gocolly/colly/v2
+          go get github.com/JohannesKaufmann/html-to-markdown
+          go get github.com/PuerkitoBio/goquery
+          
+          # 整理并生成 go.sum
           go mod tidy
-
-      - name: Run Scraper
-        run: |
+          
+          # 运行爬虫
           mkdir -p knowledge_base
-          # 运行前清理，确保知识库没有过时的旧页面
-          rm -rf knowledge_base/*.md
           go run main.go
+          
+          # 检查结果
+          echo "==== 抓取结果 ===="
+          ls -R knowledge_base/
 
-      - name: Deploy to Repository
+      - name: Deploy
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "docs(auto): sync CustomCrops wiki with annotated codeblocks"
-          # 关键：确保把代码生成的 md 和 自动整理的 mod/sum 都存回去
+          commit_message: "docs(auto): initial sync of knowledge base"
+          # 确保提交所有生成的文件，包括新生成的 go.sum
           file_pattern: 'knowledge_base/*.md go.mod go.sum'
-          # 设置提交者，方便在 Commit 记录中识别是机器人操作
-          commit_user_name: "KnowledgeBase-Bot"
-          commit_user_email: "actions@github.com"
-          commit_author: "KnowledgeBase-Bot <actions@github.com>"
-          # 如果内容没变化，不报错直接退出
-          skip_dirty_check: false
