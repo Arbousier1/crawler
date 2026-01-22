@@ -1,0 +1,76 @@
+name: Build Minecraft Dev Encyclopedia
+
+on:
+  schedule:
+    # 每天凌晨 3:00 (UTC) 运行，确保你的百科全书始终保持最新
+    - cron: '0 3 * * *'
+  workflow_dispatch: # 允许手动点击按钮立即触发
+
+permissions:
+  contents: read # 仅需读取权限，产物将通过 Artifacts 形式上传
+
+jobs:
+  build-kb:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. 拉取仓库代码
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # 2. 设置 Go 1.24 环境
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true # 开启缓存以加快后续构建速度
+
+      # 3. 安装 PDF 转换工具链与中文字体 (解决 PDF 乱码的关键)
+      - name: Install PDF Tools & Fonts
+        run: |
+          sudo apt-get update
+          # 安装 Pandoc 和 WeasyPrint 所需的最小依赖，以及文泉驿正黑字体
+          sudo apt-get install -y pandoc python3-pip fonts-wqy-zenhei
+          pip3 install weasyprint
+
+      # 4. 运行大师级爬虫
+      # 注意：如果你的 main.go 在子目录下，请使用 working-directory
+      - name: Run Master Crawler
+        run: |
+          # 自动初始化并整理 Go 依赖
+          go mod tidy || (go mod init minecraft-kb && go mod tidy)
+          # 运行爬虫生成合并后的 Markdown 文件
+          go run main.go
+          
+          # 验证 Markdown 是否成功生成
+          if [ ! -f Minecraft_Dev_Encyclopedia.md ]; then
+            echo "Error: Minecraft_Dev_Encyclopedia.md was not generated!"
+            exit 1
+          fi
+
+      # 5. 使用 Pandoc 将 Markdown 转换为 PDF
+      - name: Convert to PDF
+        run: |
+          # --toc 自动生成目录
+          # --pdf-engine=weasyprint 完美支持网页中的 HTML/CSS
+          # -V mainfont 指定中文字体防止 PDF 出现乱码
+          # --no-resource-fallback 即使图片抓取失败也强制生成 PDF，防止构建崩溃
+          pandoc Minecraft_Dev_Encyclopedia.md \
+            -o Minecraft_Dev_Encyclopedia.pdf \
+            --pdf-engine=weasyprint \
+            --toc \
+            --toc-depth=3 \
+            -V mainfont="WenQuanYi Zen Hei" \
+            -V geometry:margin=0.8in \
+            -V colorlinks=true \
+            --metadata=title:"Minecraft 插件开发与运维百科全书"
+
+      # 6. 上传最终产物到 GitHub Actions
+      - name: Upload Encyclopedia Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minecraft-Development-Encyclopedia
+          path: |
+            Minecraft_Dev_Encyclopedia.pdf
+            Minecraft_Dev_Encyclopedia.md
+          retention-days: 30 # 文件保留 30 天
