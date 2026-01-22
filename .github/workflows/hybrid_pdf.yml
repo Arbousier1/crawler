@@ -1,38 +1,55 @@
-name: Update GitBook Knowledge Base
+name: CustomCrops KB Auto-Update
 
 on:
   schedule:
-    - cron: '0 2 * * *' # 每天凌晨 2 点运行
-  workflow_dispatch:
+    # 每天北京时间上午 10:00 运行一次 (UTC 02:00)
+    - cron: '0 2 * * *'
+  workflow_dispatch: # 允许你在 GitHub 页面上点击按钮手动触发
 
+# 赋予 Action 写入仓库的权限
 permissions:
   contents: write
 
 jobs:
-  scrape:
+  build-and-scrape:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout
+      # 1. 拉取仓库代码
+      - name: Checkout Code
         uses: actions/checkout@v4
 
+      # 2. 安装 Go 环境 (使用最新的 1.24 以支持 colly/v2)
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.24'
+          cache: true
 
-      - name: Install & Run
+      # 3. 自动初始化环境 (防止 go.mod/go.sum 缺失或损坏)
+      - name: Initialize Environment
         run: |
-          go mod init customcrops-scraper || true
-          go get github.com/gocolly/colly/v2
-          go get github.com/JohannesKaufmann/html-to-markdown
-          
-          # 清理旧数据，防止死链残留
+          if [ ! -f go.mod ]; then
+            go mod init customcrops-scraper
+          fi
+          # 这一步会自动下载依赖并生成/更新 go.sum
+          go mod tidy
+
+      # 4. 运行爬虫程序
+      - name: Run Scraper
+        run: |
+          # 确保输出目录存在
+          mkdir -p knowledge_base
+          # 清理旧文件，保证知识库永远是最新且无死链的
           rm -rf knowledge_base/*.md
-          
+          # 运行 main.go
           go run main.go
 
-      - name: Commit Changes
+      # 5. 将更新后的 Markdown 文件自动提交回仓库
+      - name: Deploy to Repository
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "docs: update knowledge base from GitBook"
-          file_pattern: 'knowledge_base/*.md'
+          commit_message: "docs(auto): sync CustomCrops documentation to KB"
+          file_pattern: 'knowledge_base/*.md go.mod go.sum'
+          # 如果知识库没有变化，Action 不会报错
+          skip_dirty_check: false
