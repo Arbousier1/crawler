@@ -1,59 +1,60 @@
-name: MOMI-Wiki-Builder
+name: MOMI Wiki Scraper
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch: # 允许手动点击按钮触发
+  schedule:
+    - cron: '0 2 * * 1' # 每周一凌晨 2 点自动运行 (可选)
 
 jobs:
-  build:
+  scrape-and-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    
     steps:
-      - name: Checkout Code
+      - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Go
+      - name: 🐹 Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24' # 使用你日志中的最新版本
+          go-version: '1.24'
 
-      - name: Install Chrome & Ghostscript
+      - name: 🌐 Install Chrome
+        # Ubuntu Latest 自带 Chrome，但为了保险起见，我们显式安装最新版
         run: |
+          wget -q -O - https://dl-google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
           sudo apt-get update
-          sudo apt-get install -y google-chrome-stable ghostscript
+          sudo apt-get install -y google-chrome-stable
 
-      - name: Run Go Crawler & Merge
+      - name: 🏃 Run Crawler
         run: |
-          # 1. 进入代码目录
-          cd go_crawler
+          # 初始化模块 (如果仓库里没有 go.mod)
+          if [ ! -f go.mod ]; then
+            go mod init gitbook-scraper
+            go get -u github.com/chromedp/chromedp
+            go get -u github.com/PuerkitoBio/goquery
+            go get -u github.com/JohannesKaufmann/html-to-markdown
+          else
+            go mod tidy
+          fi
           
-          # 2. 初始化环境（确保依赖干净）
-          rm -f go.mod go.sum
-          go mod init wiki-crawler
-          go mod tidy
-          
-          # 3. 执行爬虫（扫描 + 渲染 + 自动合并）
-          # 运行结束后会生成 MOMI_CustomCrops_Wiki.pdf
+          # 运行爬虫
+          echo "🚀 Starting Scraper..."
           go run main.go
-          
-          # 4. 将合并好的原始文件移动到根目录，准备压缩
-          mv MOMI_CustomCrops_Wiki.pdf ../Wiki_Raw.pdf
 
-      - name: Ghostscript AI Compression
+      - name: 📦 Zip Knowledge Base
         run: |
-          # 极致压缩：保留文字，将图片降采样至 60dpi
-          # 这能极大减小文件体积，同时保证 AI 能够识别内容
-          gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 \
-              -dPDFSETTINGS=/screen \
-              -dNOPAUSE -dQUIET -dBATCH \
-              -dColorImageDownsampleType=/Bicubic -dColorImageResolution=60 \
-              -dGrayImageDownsampleType=/Bicubic -dGrayImageResolution=60 \
-              -dMonoImageDownsampleType=/Bicubic -dMonoImageResolution=60 \
-              -sOutputFile=MOMI_Wiki_AI_Final.pdf \
-              Wiki_Raw.pdf
+          # 检查是否有文件生成
+          if [ -d "knowledge_base" ]; then
+            zip -r momi_knowledge_base.zip knowledge_base
+          else
+            echo "❌ No knowledge base directory found!"
+            exit 1
+          fi
 
-      - name: Upload Final PDF
+      - name: 📤 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MOMI-Wiki-Result
-          path: MOMI_Wiki_AI_Final.pdf
+          name: momi-wiki-markdown
+          path: momi_knowledge_base.zip
+          retention-days: 90
