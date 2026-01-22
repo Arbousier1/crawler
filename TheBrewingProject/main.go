@@ -1,82 +1,77 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
+	md "github.com/JohannesKaufmann/html-to-markdown"
+	"github.com/gocolly/colly/v2"
 )
-
-type PageInfo struct {
-	Name string `json:"name"`
-	Slug string `json:"slug"`
-}
-
-type PageContent struct {
-	Markdown string `json:"markdown"`
-}
-
-// 通用的请求函数，包含必要的 Header 伪装
-func fetch(client *http.Client, url string, target interface{}) error {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return err
-	}
-
-	// 必须设置 User-Agent，否则 Hangar 会返回 403 错误
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("HTTP 状态异常: %s", resp.Status)
-	}
-
-	return json.NewDecoder(resp.Body).Decode(target)
-}
 
 func main() {
 	outputFile := "TheBrewingProject_Wiki.md"
-	f, err := os.Create(outputFile)
-	if err != nil {
-		fmt.Printf("❌ 无法创建文件: %v\n", err)
-		return
-	}
+	f, _ := os.Create(outputFile)
 	defer f.Close()
 
-	f.WriteString("---\ntitle: The Brewing Project 官方 Wiki (API 版)\nauthor: 自动化助理\ntoc: true\nlang: zh-CN\n---\n\n")
+	// 写入 PDF 元数据
+	f.WriteString("---\ntitle: The Brewing Project 官方百科\nauthor: 艾尔岚开发组\ntoc: true\nlang: zh-CN\n---\n\n")
 
-	project := "BreweryTeam/TheBrewingProject"
-	client := &http.Client{Timeout: 30 * time.Second}
+	visited := make(map[string]bool)
+	// 创建爬虫实例
+	c := colly.NewCollector(
+		colly.AllowedDomains("hangar.papermc.io"),
+		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+	)
 
-	fmt.Println("🚀 正在从 Hangar API 获取页面索引...")
-	listURL := fmt.Sprintf("https://hangar.papermc.io/api/internal/projects/%s/pages", project)
-	
-	var pages []PageInfo
-	if err := fetch(client, listURL, &pages); err != nil {
-		fmt.Printf("❌ 获取页面列表失败: %v\n", err)
-		return
-	}
+	converter := md.NewConverter("", true, nil)
 
-	for _, page := range pages {
-		fmt.Printf("📖 正在提取页面: %s\n", page.Name)
-		contentURL := fmt.Sprintf("https://hangar.papermc.io/api/internal/pages/page/%s/%s", project, page.Slug)
-		
-		var content PageContent
-		if err := fetch(client, contentURL, &content); err != nil {
-			fmt.Printf("⚠️ 跳过页面 %s: %v\n", page.Name, err)
-			continue
+	// 1. 提取正文逻辑
+	// Hangar 的文档正文通常在 .markdown-content 或 .project-page 内
+	c.OnHTML(".markdown-content, .project-page, .markdown-body", func(e *colly.HTMLElement) {
+		url := e.Request.URL.String()
+		if visited[url] {
+			return
+		}
+		visited[url] = true
+
+		// 获取标题：优先找 H1，找不到则用 URL 最后一段
+		title := e.DOM.Find("h1").First().Text()
+		if title == "" {
+			parts := strings.Split(strings.TrimSuffix(url, "/"), "/")
+			title = parts[len(parts)-1]
 		}
 
-		f.WriteString(fmt.Sprintf("# %s\n\n%s\n\n\\newpage\n\n", page.Name, content.Markdown))
-		time.Sleep(300 * time.Millisecond) // 避免请求过快
-	}
+		fmt.Printf("✅ 正在提取章节: %s\n", title)
 
-	fmt.Println("✨ 构建完成！")
+		// 修复相对路径图片
+		e.DOM.Find("img").Each(func(i int, s *goquery.Selection) {
+			src, _ := s.Attr("src")
+			if strings.HasPrefix(src, "/") {
+				s.SetAttr("src", "https://hangar.papermc.io"+src)
+			}
+		})
+
+		html, _ := e.DOM.Html()
+		markdown, _ := converter.ConvertString(html)
+
+		f.WriteString(fmt.Sprintf("# %s\n\n%s\n\n\\newpage\n\n", title, markdown))
+	})
+
+	// 2. 发现侧边栏链接逻辑
+	// 匹配侧边栏或页面中所有指向 /pages/ 的内部链接
+	c.OnHTML("a[href*='/pages/']", func(e *colly.HTMLElement) {
+		link := e.Request.AbsoluteURL(e.Attr("href"))
+		// 确保链接属于该插件的文档范围，且排除锚点
+		if strings.Contains(link, "/BreweryTeam/TheBrewingProject/pages/") && !strings.Contains(link, "#") {
+			c.Visit(link)
+		}
+	})
+
+	fmt.Println("🚀 正在从 Hangar 网站深度爬取 BrewingProject Wiki...")
+	c.Visit("https://hangar.papermc.io/BreweryTeam/TheBrewingProject/pages/Wiki")
+	c.Wait()
+	fmt.Println("✨ 抓取完成，文件已保存为:", outputFile)
 }
