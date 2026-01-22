@@ -1,14 +1,15 @@
-name: MOMI Wiki Scraper
+name: MOMI Wiki Scraper (Markdown)
 
 on:
   workflow_dispatch: # 允许手动点击按钮触发
   schedule:
-    - cron: '0 2 * * 1' # 每周一凌晨 2 点自动运行 (可选)
+    - cron: '0 2 * * 1' # 每周一自动更新
 
 jobs:
-  scrape-and-build:
+  scrape:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 20
+
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
@@ -18,43 +19,41 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: 🌐 Install Chrome
-        # Ubuntu Latest 自带 Chrome，但为了保险起见，我们显式安装最新版
-        run: |
-          wget -q -O - https://dl-google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google.list'
-          sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
+      # ⚠️ 注意：这里删除了 Install Chrome 的步骤
+      # Ubuntu-latest 环境已经内置了 Google Chrome，直接用即可
 
-      - name: 🏃 Run Crawler
+      - name: 🏃 Run Scraper
         run: |
-          # 初始化模块 (如果仓库里没有 go.mod)
+          # 1. 确保 go.mod 存在 (如果仓库里没有，这里自动生成)
           if [ ! -f go.mod ]; then
-            go mod init gitbook-scraper
+            echo "Initializing Go module..."
+            go mod init wiki-crawler
             go get -u github.com/chromedp/chromedp
             go get -u github.com/PuerkitoBio/goquery
             go get -u github.com/JohannesKaufmann/html-to-markdown
           else
+            echo "Tidying dependencies..."
             go mod tidy
           fi
-          
-          # 运行爬虫
-          echo "🚀 Starting Scraper..."
+
+          # 2. 运行 Go 代码
+          echo "Starting extraction..."
           go run main.go
 
       - name: 📦 Zip Knowledge Base
         run: |
-          # 检查是否有文件生成
+          # 检查是否有输出
           if [ -d "knowledge_base" ]; then
-            zip -r momi_knowledge_base.zip knowledge_base
+            zip -r momi_wiki_knowledge.zip knowledge_base
+            echo "✅ Zipped successfully."
           else
-            echo "❌ No knowledge base directory found!"
+            echo "❌ No knowledge_base directory found!"
             exit 1
           fi
 
       - name: 📤 Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: momi-wiki-markdown
-          path: momi_knowledge_base.zip
+          name: MOMI-Wiki-Markdown
+          path: momi_wiki_knowledge.zip
           retention-days: 90
