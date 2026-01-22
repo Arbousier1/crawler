@@ -5,11 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 )
 
-// Hangar V1 页面响应结构
 type PageInfo struct {
 	Name string `json:"name"`
 	Slug string `json:"slug"`
@@ -19,16 +17,15 @@ type PageContent struct {
 	Markdown string `json:"markdown"`
 }
 
-func fetchHangar(client *http.Client, url string, target interface{}) error {
-	// 彻底清理 URL，确保没有多余的空格或括号
-	cleanURL := strings.TrimSpace(url)
-	req, err := http.NewRequest("GET", cleanURL, nil)
+// 通用的请求函数，包含必要的 Header 伪装
+func fetch(client *http.Client, url string, target interface{}) error {
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return err
 	}
 
-	// 遵循官方准则：设置有意义的 User-Agent
-	req.Header.Set("User-Agent", "EcoBridge-Knowledge-Base-Bot/1.0 (Contact: Ellan-Dev-Group)")
+	// 必须设置 User-Agent，否则 Hangar 会返回 403 错误
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
@@ -38,7 +35,7 @@ func fetchHangar(client *http.Client, url string, target interface{}) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, resp.Status)
+		return fmt.Errorf("HTTP 状态异常: %s", resp.Status)
 	}
 
 	return json.NewDecoder(resp.Body).Decode(target)
@@ -53,41 +50,33 @@ func main() {
 	}
 	defer f.Close()
 
-	// 写入合规元数据
-	f.WriteString("---\ntitle: The Brewing Project 官方百科 (V1 API)\nauthor: 艾尔岚开发组\ntoc: true\nlang: zh-CN\n---\n\n")
+	f.WriteString("---\ntitle: The Brewing Project 官方 Wiki (API 版)\nauthor: 自动化助理\ntoc: true\nlang: zh-CN\n---\n\n")
 
-	// 官方参数
-	author := "BreweryTeam"
-	project := "TheBrewingProject"
-	baseURL := "https://hangar.papermc.io/api/v1"
-	
-	// 官方建议 Anonymous 访问公开信息不需要 JWT
+	project := "BreweryTeam/TheBrewingProject"
 	client := &http.Client{Timeout: 30 * time.Second}
 
-	fmt.Println("🚀 正在遵循 Hangar V1 准则获取页面列表...")
-	listURL := fmt.Sprintf("%s/projects/%s/%s/pages", baseURL, author, project)
+	fmt.Println("🚀 正在从 Hangar API 获取页面索引...")
+	listURL := fmt.Sprintf("https://hangar.papermc.io/api/internal/projects/%s/pages", project)
 	
-	var pagesMap map[string]PageInfo
-	if err := fetchHangar(client, listURL, &pagesMap); err != nil {
-		fmt.Printf("❌ API 访问失败: %v\n", err)
+	var pages []PageInfo
+	if err := fetch(client, listURL, &pages); err != nil {
+		fmt.Printf("❌ 获取页面列表失败: %v\n", err)
 		return
 	}
 
-	// 遵循速率限制：官方默认 20req/5s
-	// 我们设置每个请求间隔 300ms 确保绝对安全
-	for path, info := range pagesMap {
-		fmt.Printf("📖 正在同步章节: %s\n", info.Name)
+	for _, page := range pages {
+		fmt.Printf("📖 正在提取页面: %s\n", page.Name)
+		contentURL := fmt.Sprintf("https://hangar.papermc.io/api/internal/pages/page/%s/%s", project, page.Slug)
 		
-		contentURL := fmt.Sprintf("%s/projects/%s/%s/pages/%s", baseURL, author, project, path)
 		var content PageContent
-		if err := fetchHangar(client, contentURL, &content); err != nil {
-			fmt.Printf("⚠️ 页面获取中断: %v\n", err)
+		if err := fetch(client, contentURL, &content); err != nil {
+			fmt.Printf("⚠️ 跳过页面 %s: %v\n", page.Name, err)
 			continue
 		}
 
-		f.WriteString(fmt.Sprintf("# %s\n\n%s\n\n\\newpage\n\n", info.Name, content.Markdown))
-		time.Sleep(300 * time.Millisecond) 
+		f.WriteString(fmt.Sprintf("# %s\n\n%s\n\n\\newpage\n\n", page.Name, content.Markdown))
+		time.Sleep(300 * time.Millisecond) // 避免请求过快
 	}
 
-	fmt.Println("✨ 抓取任务圆满完成！")
+	fmt.Println("✨ 构建完成！")
 }
