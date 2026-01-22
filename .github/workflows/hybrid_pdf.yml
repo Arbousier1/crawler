@@ -1,12 +1,12 @@
-name: AI-Optimized Wiki Builder
+name: MOMI-Wiki-Builder
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手动触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60 
+    timeout-minutes: 60
 
     steps:
       - name: Checkout Code
@@ -15,56 +15,45 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.24' # 使用你日志中的最新版本
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install System Dependencies
+      - name: Install Chrome & Ghostscript
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable ghostscript
-          pip install pymupdf
 
-      - name: Run Go Crawler (MOMI CustomCrops)
+      - name: Run Go Crawler & Merge
         run: |
-          # 进入 Go 项目目录
+          # 1. 进入代码目录
           cd go_crawler
-          # 重新初始化确保依赖最新
+          
+          # 2. 初始化环境（确保依赖干净）
           rm -f go.mod go.sum
           go mod init wiki-crawler
           go mod tidy
-          # 运行爬虫，生成 MOMI_CustomCrops_Wiki.pdf
+          
+          # 3. 执行爬虫（扫描 + 渲染 + 自动合并）
+          # 运行结束后会生成 MOMI_CustomCrops_Wiki.pdf
           go run main.go
-          # 移动到根目录供后续步骤使用，并改名为 Python 脚本预期的输入名
-          mv MOMI_CustomCrops_Wiki.pdf ../Wiki_Raw_Merged.pdf
+          
+          # 4. 将合并好的原始文件移动到根目录，准备压缩
+          mv MOMI_CustomCrops_Wiki.pdf ../Wiki_Raw.pdf
 
-      - name: Python Preliminary Clean (Optional)
+      - name: Ghostscript AI Compression
         run: |
-          # 检查是否有 Python 脚本，如果没有则跳过
-          if [ -f python_finisher/merge.py ]; then
-            python python_finisher/merge.py
-          else
-            echo "No python script found, skipping to Ghostscript."
-          fi
-
-      - name: Ghostscript Extreme AI Compression
-        run: |
-          # 极限压缩：下采样到 60dpi，删除所有非文字元数据
-          # 输入文件来自上一阶段重命名的 Wiki_Raw_Merged.pdf
+          # 极致压缩：保留文字，将图片降采样至 60dpi
+          # 这能极大减小文件体积，同时保证 AI 能够识别内容
           gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 \
               -dPDFSETTINGS=/screen \
               -dNOPAUSE -dQUIET -dBATCH \
               -dColorImageDownsampleType=/Bicubic -dColorImageResolution=60 \
               -dGrayImageDownsampleType=/Bicubic -dGrayImageResolution=60 \
               -dMonoImageDownsampleType=/Bicubic -dMonoImageResolution=60 \
-              -sOutputFile=Wiki_AI_Final.pdf \
-              Wiki_Raw_Merged.pdf
+              -sOutputFile=MOMI_Wiki_AI_Final.pdf \
+              Wiki_Raw.pdf
 
       - name: Upload Final PDF
         uses: actions/upload-artifact@v4
         with:
-          name: MOMI-Wiki-Data
-          path: Wiki_AI_Final.pdf
+          name: MOMI-Wiki-Result
+          path: MOMI_Wiki_AI_Final.pdf
