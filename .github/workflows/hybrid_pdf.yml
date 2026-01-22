@@ -12,25 +12,33 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.24' # 保持与你日志中自动下载的版本一致
 
       - name: Install Dependencies & Chrome
         run: |
+          # 1. 安装 Chrome 浏览器
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
-          
+
+          # 2. 初始化 Go 模块 (在根目录)
           rm -rf go.mod go.sum
-          go mod init wiki-multimodal
+          go mod init wiki-crawler
+          
+          # 3. 下载必要的 Go 依赖
           go get github.com/chromedp/chromedp
           go get github.com/chromedp/cdproto/network
+          go get github.com/chromedp/cdproto/page
           go get github.com/pdfcpu/pdfcpu/pkg/api
           go mod tidy
 
-      - name: Run Multimodal Crawler
+      - name: Run Crawler
+        # 运行根目录下的 go_crawler/main.go
+        # PDF 将会生成在当前工作目录(根目录)
         run: go run go_crawler/main.go
 
       - name: Upload Final PDF
         uses: actions/upload-artifact@v4
         with:
-          name: Wiki-Multimodal-PDF
-          path: Wiki_Multimodal_AI.pdf
+          name: Wiki-Full-Dump-PDF
+          # 【关键修复】这里必须匹配 main.go 里的 FinalPDF 常量
+          path: Wiki_Full_Dump.pdf
