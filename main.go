@@ -18,7 +18,7 @@ type WikiSource struct {
 	BaseURL  string
 	Domain   string
 	Selector string
-	Filter   string
+	Filter   string // 必须包含的路径关键词
 }
 
 // 清理无效内部锚点链接，解决 Pandoc 转换 PDF 时的报错
@@ -36,9 +36,8 @@ func main() {
 	}
 	defer f.Close()
 
-	// 写入百科全书元数据
 	f.WriteString("---\n")
-	f.WriteString("title: Minecraft 开发百科全书 (技术版)\n")
+	f.WriteString("title: Minecraft 开发百科全书 (全集成版)\n")
 	f.WriteString("author: 艾尔岚 (Ellan) 开发组\n")
 	f.WriteString(fmt.Sprintf("date: %s\n", time.Now().Format("2006-01-02")))
 	f.WriteString("toc: true\n")
@@ -64,7 +63,6 @@ func main() {
 		},
 		{
 			Name:     "CraftEngine",
-			// 如果有英文版地址可在此更改 StartURL，目前保持根地址但通过逻辑过滤中文
 			StartURL: "https://xiao-momi.github.io/craft-engine-wiki/",
 			BaseURL:  "https://xiao-momi.github.io",
 			Domain:   "xiao-momi.github.io",
@@ -76,8 +74,10 @@ func main() {
 			StartURL: "https://hangar.papermc.io/BreweryTeam/TheBrewingProject/pages/Wiki",
 			BaseURL:  "https://hangar.papermc.io",
 			Domain:   "hangar.papermc.io",
-			Selector: ".project-page, .markdown-body",
-			Filter:   "/pages/",
+			// Hangar 的正文通常在 .project-page 或 markdown-body 内
+			Selector: ".project-page, .markdown-content, .markdown-body",
+			// 修正 Filter 以匹配 Hangar 的子页面路径
+			Filter:   "/BreweryTeam/TheBrewingProject/pages/",
 		},
 	}
 
@@ -88,13 +88,16 @@ func main() {
 		visited := make(map[string]bool)
 		c := colly.NewCollector(
 			colly.AllowedDomains(src.Domain, "gitbook.io"),
-			colly.UserAgent("Mozilla/5.0"),
+			colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+			colly.Async(true),
 		)
+
+		c.Limit(&colly.LimitRule{DomainGlob: "*", Parallelism: 2, RandomDelay: 1 * time.Second})
 
 		c.OnHTML(src.Selector, func(e *colly.HTMLElement) {
 			url := e.Request.URL.String()
 
-			// 【核心修改】：如果来源是 CraftEngine 且路径包含中文标识，则直接跳过
+			// 1. 屏蔽 CraftEngine 中文 Wiki
 			if src.Name == "CraftEngine" && (strings.Contains(url, "/zh-Hans/") || strings.Contains(url, "/zh-CN/")) {
 				return
 			}
@@ -102,9 +105,14 @@ func main() {
 			if visited[url] { return }
 			visited[url] = true
 
-			fmt.Printf("[%s] 正在处理: %s\n", src.Name, url)
+			title := e.DOM.Find("h1").First().Text()
+			if title == "" {
+				parts := strings.Split(strings.TrimSuffix(url, "/"), "/")
+				title = parts[len(parts)-1]
+			}
+			fmt.Printf("[%s] 正在处理: %s\n", src.Name, title)
 
-			// 修复图片路径
+			// 2. 修复图片路径 (WeasyPrint 转换必需)
 			e.DOM.Find("img").Each(func(i int, s *goquery.Selection) {
 				imgSrc, _ := s.Attr("src")
 				if strings.HasPrefix(imgSrc, "/") {
@@ -112,27 +120,37 @@ func main() {
 				}
 			})
 
+			// 3. 标注上下文，方便 EcoBridge 开发时 AI 识别
+			e.DOM.Find("pre").Each(func(i int, s *goquery.Selection) {
+				s.PrependHtml(fmt.Sprintf("", src.Name, title))
+			})
+
 			html, _ := e.DOM.Html()
 			markdown, _ := converter.ConvertString(html)
 			cleanedMarkdown := cleanInternalLinks(markdown)
 
-			f.WriteString(fmt.Sprintf("\n## %s\n\n%s\n\n\\newpage\n", e.DOM.Find("h1").First().Text(), cleanedMarkdown))
+			f.WriteString(fmt.Sprintf("\n## %s\n\n%s\n\n\\newpage\n", title, cleanedMarkdown))
 		})
 
+		// 4. 递归寻找文档链接
 		c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 			link := e.Request.AbsoluteURL(e.Attr("href"))
-
-			// 【核心修改】：递归链接时也屏蔽中文路径
+			
+			// 屏蔽 CraftEngine 中文链接递归
 			if src.Name == "CraftEngine" && (strings.Contains(link, "/zh-Hans/") || strings.Contains(link, "/zh-CN/")) {
 				return
 			}
 
+			// 适配 Hangar 的路径识别
 			if strings.Contains(link, src.Domain) && strings.Contains(link, src.Filter) && !strings.Contains(link, "#") {
-				c.Visit(link)
+				if !visited[link] {
+					e.Request.Visit(link)
+				}
 			}
 		})
 
 		c.Visit(src.StartURL)
 		c.Wait()
 	}
+	fmt.Println("✨ 跨平台百科全书构建完成！")
 }
