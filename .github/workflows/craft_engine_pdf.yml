@@ -1,0 +1,62 @@
+name: CraftEngine Wiki to PDF
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch: 
+
+permissions:
+  contents: read
+
+jobs:
+  build-craft-engine-kb:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install PDF Tools & Fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc python3-pip fonts-wqy-zenhei
+          pip3 install weasyprint
+
+      - name: Run Crawler
+        working-directory: ./craft-engine
+        run: |
+          # 自动初始化并整理依赖
+          if [ ! -f go.mod ]; then go mod init craft-engine-scraper; fi
+          go mod tidy
+          go run main.go
+          
+          if [ ! -f craft_engine_wiki.md ]; then
+            echo "错误: Markdown 文件未生成！"
+            exit 1
+          fi
+
+      - name: Convert to PDF
+        working-directory: ./craft-engine
+        run: |
+          pandoc craft_engine_wiki.md \
+            -o craft_engine_wiki.pdf \
+            --pdf-engine=weasyprint \
+            --toc \
+            --toc-depth=3 \
+            -V mainfont="WenQuanYi Zen Hei" \
+            -V geometry:margin=1in \
+            -V colorlinks=true
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CraftEngine-Wiki-PDF
+          path: |
+            craft-engine/craft_engine_wiki.pdf
+            craft-engine/craft_engine_wiki.md
+          retention-days: 14
