@@ -8,7 +8,6 @@ import (
 	"time"
 )
 
-// Hangar API 响应结构
 type PageInfo struct {
 	Name string `json:"name"`
 	Slug string `json:"slug"`
@@ -18,64 +17,66 @@ type PageContent struct {
 	Markdown string `json:"markdown"`
 }
 
+// 通用的请求函数，包含必要的 Header 伪装
+func fetch(client *http.Client, url string, target interface{}) error {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+
+	// 必须设置 User-Agent，否则 Hangar 会返回 403 错误
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("HTTP 状态异常: %s", resp.Status)
+	}
+
+	return json.NewDecoder(resp.Body).Decode(target)
+}
+
 func main() {
 	outputFile := "TheBrewingProject_Wiki.md"
 	f, err := os.Create(outputFile)
 	if err != nil {
-		fmt.Printf("无法创建文件: %v\n", err)
+		fmt.Printf("❌ 无法创建文件: %v\n", err)
 		return
 	}
 	defer f.Close()
 
-	// 写入元数据 (Pandoc 兼容)
-	f.WriteString("---\n")
-	f.WriteString("title: The Brewing Project 官方 Wiki (API 版)\n")
-	f.WriteString("author: 艾尔岚开发组\n")
-	f.WriteString(fmt.Sprintf("date: %s\n", time.Now().Format("2006-01-02")))
-	f.WriteString("toc: true\n")
-	f.WriteString("lang: zh-CN\n")
-	f.WriteString("---\n\n")
+	f.WriteString("---\ntitle: The Brewing Project 官方 Wiki (API 版)\nauthor: 自动化助理\ntoc: true\nlang: zh-CN\n---\n\n")
 
 	project := "BreweryTeam/TheBrewingProject"
 	client := &http.Client{Timeout: 30 * time.Second}
 
-	// 1. 获取所有 Wiki 页面列表
 	fmt.Println("🚀 正在从 Hangar API 获取页面索引...")
 	listURL := fmt.Sprintf("https://hangar.papermc.io/api/internal/projects/%s/pages", project)
-	resp, err := client.Get(listURL)
-	if err != nil || resp.StatusCode != 200 {
-		fmt.Printf("API 访问失败: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
+	
 	var pages []PageInfo
-	if err := json.NewDecoder(resp.Body).Decode(&pages); err != nil {
-		fmt.Printf("解析 JSON 失败: %v\n", err)
+	if err := fetch(client, listURL, &pages); err != nil {
+		fmt.Printf("❌ 获取页面列表失败: %v\n", err)
 		return
 	}
 
-	// 2. 遍历并拉取原始 Markdown
 	for _, page := range pages {
-		fmt.Printf("正在提取页面: %s\n", page.Name)
-		
+		fmt.Printf("📖 正在提取页面: %s\n", page.Name)
 		contentURL := fmt.Sprintf("https://hangar.papermc.io/api/internal/pages/page/%s/%s", project, page.Slug)
-		cResp, cErr := client.Get(contentURL)
-		if cErr != nil || cResp.StatusCode != 200 {
+		
+		var content PageContent
+		if err := fetch(client, contentURL, &content); err != nil {
+			fmt.Printf("⚠️ 跳过页面 %s: %v\n", page.Name, err)
 			continue
 		}
 
-		var content PageContent
-		json.NewDecoder(cResp.Body).Decode(&content)
-		cResp.Body.Close()
-
-		// 写入 Markdown
-		f.WriteString(fmt.Sprintf("# %s\n\n", page.Name))
-		f.WriteString(content.Markdown)
-		f.WriteString("\n\n\\newpage\n\n")
-		
-		time.Sleep(200 * time.Millisecond) // 适度延迟
+		f.WriteString(fmt.Sprintf("# %s\n\n%s\n\n\\newpage\n\n", page.Name, content.Markdown))
+		time.Sleep(300 * time.Millisecond) // 避免请求过快
 	}
 
-	fmt.Println("✨ 抓取完成！百科全书 Markdown 已就绪。")
+	fmt.Println("✨ 构建完成！")
 }
