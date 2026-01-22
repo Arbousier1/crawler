@@ -1,202 +1,127 @@
 package main
 
 import (
-	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
-	"github.com/PuerkitoBio/goquery"
-	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/chromedp"
-)
-
-// Config
-const (
-	TargetURL = "https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops"
-	OutputDir = "./knowledge_base"
+	"github.com/gocolly/colly/v2"
 )
 
 func main() {
 	// 1. 准备输出目录
-	if err := os.MkdirAll(OutputDir, 0755); err != nil {
-		log.Fatalf("❌ 无法创建目录: %v", err)
+	outputDir := "./knowledge_base"
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		log.Fatal(err)
 	}
 
-	// 2. 配置 Chrome (针对 GitHub Actions 优化)
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-		chromedp.Flag("headless", true),
-		chromedp.DisableGPU,
-		// ⚠️ CI 环境关键配置：防止 crashing
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
+	// 2. 初始化 Colly
+	c := colly.NewCollector(
+		colly.AllowedDomains("mo-mi.gitbook.io"),
+		// 开启异步以提高速度，但需配合 Limit 使用
+		colly.Async(true),
+		colly.CacheDir("./colly_cache"),
 	)
 
-	ctx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
+	// 限制并发，防止被 GitBook 拦截 (429 Too Many Requests)
+	c.Limit(&colly.LimitRule{
+		DomainGlob:  "*",
+		Parallelism: 2,
+		RandomDelay: 1 * time.Second,
+	})
 
-	ctx, cancel = chromedp.NewContext(ctx)
-	defer cancel()
-
-	// 设置全局超时 (15分钟)
-	ctx, cancel = context.WithTimeout(ctx, 15*time.Minute)
-	defer cancel()
-
-	log.Println("🚀 启动爬虫，正在分析目录...")
-
-	// 3. 获取链接
-	links, err := fetchSidebarLinks(ctx, TargetURL)
-	if err != nil {
-		log.Fatalf("❌ 获取目录失败: %v", err)
-	}
-
-	log.Printf("🔍 发现 %d 个页面，开始爬取内容...\n", len(links))
-
-	// 4. 遍历爬取
+	// 初始化 Markdown 转换器
 	converter := md.NewConverter("", true, nil)
 
-	for i, link := range links {
-		// 避免请求过快
-		time.Sleep(2 * time.Second)
-		log.Printf("[%d/%d] 处理: %s", i+1, len(links), link)
-
-		html, title, err := fetchPageContent(ctx, link)
-		if err != nil {
-			log.Printf("⚠️ 跳过页面 [%s]: %v", link, err)
-			continue
-		}
-
-		// 转 Markdown
-		markdown, err := converter.ConvertString(html)
-		if err != nil {
-			log.Printf("⚠️ 转换失败 [%s]: %v", title, err)
-			continue
-		}
-
-		// 拼接内容
-		fileContent := fmt.Sprintf("# %s\n\n> Original URL: %s\n\n---\n\n%s", title, link, markdown)
+	// 3. 处理内容 (GitBook 特定选择器)
+	// GitBook 的主要内容通常在 <main> 标签中
+	c.OnHTML("main", func(e *colly.HTMLElement) {
+		url := e.Request.URL.String()
 		
-		// 保存
-		filename := cleanFilename(title) + ".md"
-		if err := os.WriteFile(filepath.Join(OutputDir, filename), []byte(fileContent), 0644); err != nil {
-			log.Printf("❌ 保存失败: %v", err)
+		// 过滤：只处理 CustomCrops 相关的页面，防止爬到该作者的其他插件文档
+		if !strings.Contains(url, "/customcrops") {
+			return
 		}
-	}
 
-	log.Println("✅ 任务完成！所有文件已保存至:", OutputDir)
-}
+		// 尝试获取标题，GitBook 标题通常是 main 下的第一个 h1
+		title := e.DOM.Find("h1").First().Text()
+		if title == "" {
+			// 如果没找到 h1，尝试从 URL 获取最后一段作为标题
+			parts := strings.Split(url, "/")
+			if len(parts) > 0 {
+				title = parts[len(parts)-1]
+			} else {
+				title = "Untitled"
+			}
+		}
 
-func fetchSidebarLinks(ctx context.Context, urlStr string) ([]string, error) {
-	var htmlContent string
-	// 给予足够的时间加载侧边栏
-	tCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-	defer cancel()
+		fmt.Printf("Crawling: %s -> %s\n", url, title)
 
-	err := chromedp.Run(tCtx,
-		network.Enable(),
-		chromedp.Navigate(urlStr),
-		chromedp.WaitVisible("body", chromedp.ByQuery),
-		chromedp.Sleep(3*time.Second), // 等待 JS 渲染
-		chromedp.OuterHTML("html", &htmlContent),
-	)
-	if err != nil {
-		return nil, err
-	}
+		// 移除 GitBook 可能存在的 "Previous/Next" 底部导航链接，避免污染 AI 知识库
+		e.DOM.Find("a[href*='/previous']").Remove()
+		e.DOM.Find("a[href*='/next']").Remove()
 
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
-	if err != nil {
-		return nil, err
-	}
+		// 转换为 Markdown
+		markdown, err := converter.ConvertString(e.HTML)
+		if err != nil {
+			log.Printf("Error converting %s: %v", url, err)
+			return
+		}
 
-	var links []string
-	seen := make(map[string]bool)
-	baseURL, _ := url.Parse(urlStr)
+		// 构建 Frontmatter (元数据)
+		// 这对 RAG 很重要，因为它告诉 AI 这个知识的来源
+		finalContent := fmt.Sprintf("---\nsource_url: %s\ntitle: %s\ncrawled_at: %s\n---\n\n%s",
+			url, title, time.Now().Format("2006-01-02"), markdown)
 
-	// 抓取逻辑：优先查找 nav 标签
-	doc.Find("nav a").Each(func(_ int, s *goquery.Selection) {
-		href, exists := s.Attr("href")
-		if exists {
-			resolveLink(&links, seen, baseURL, href)
+		fileName := sanitizeFilename(url) + ".md"
+		filePath := filepath.Join(outputDir, fileName)
+
+		if err := os.WriteFile(filePath, []byte(finalContent), 0644); err != nil {
+			log.Printf("Error writing file %s: %v", filePath, err)
 		}
 	})
 
-	// 兜底逻辑：如果 nav 没抓到，抓取所有同域链接
-	if len(links) == 0 {
-		doc.Find("a").Each(func(_ int, s *goquery.Selection) {
-			href, exists := s.Attr("href")
-			if exists {
-				resolveLink(&links, seen, baseURL, href)
-			}
-		})
-	}
-
-	return links, nil
-}
-
-func resolveLink(links *[]string, seen map[string]bool, base *url.URL, href string) {
-	// 解析绝对路径
-	u, err := base.Parse(href)
-	if err != nil {
-		return
-	}
-	// 只保留同域名下的内容
-	if u.Host == base.Host && !seen[u.String()] {
-		// 排除非文档链接
-		if !strings.Contains(u.String(), "/edit/") && !strings.Contains(u.String(), "/history/") {
-			*links = append(*links, u.String())
-			seen[u.String()] = true
+	// 4. 链接发现 (递归爬取)
+	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
+		link := e.Attr("href")
+		
+		// 确保只访问该文档库内部的链接
+		// 必须包含 /xiaomomi-plugins/ 且不包含 # (锚点)
+		if strings.Contains(link, "/xiaomomi-plugins/") && !strings.Contains(link, "#") {
+			e.Request.Visit(link)
 		}
-	}
+	})
+
+	c.OnError(func(r *colly.Response, err error) {
+		log.Printf("Failed: %s (Status: %d) - %v", r.Request.URL, r.StatusCode, err)
+	})
+
+	fmt.Println("Starting GitBook crawler...")
+	// 入口链接
+	c.Visit("https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops")
+	
+	// 等待所有异步任务完成
+	c.Wait()
 }
 
-func fetchPageContent(ctx context.Context, urlStr string) (string, string, error) {
-	var htmlContent string
-	tCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	err := chromedp.Run(tCtx,
-		chromedp.Navigate(urlStr),
-		chromedp.WaitVisible("main", chromedp.ByQuery), // 只要主内容出来即可
-		chromedp.OuterHTML("html", &htmlContent),
-	)
-	if err != nil {
-		return "", "", err
+// 保持不变的文件名清理函数
+func sanitizeFilename(url string) string {
+	hash := md5.Sum([]byte(url))
+	shortHash := hex.EncodeToString(hash[:])[:6]
+	
+	cleanName := strings.ReplaceAll(url, "https://", "")
+	cleanName = strings.ReplaceAll(cleanName, "mo-mi.gitbook.io/", "")
+	cleanName = strings.ReplaceAll(cleanName, "xiaomomi-plugins/", "")
+	cleanName = strings.ReplaceAll(cleanName, "/", "-")
+	
+	if len(cleanName) > 60 {
+		cleanName = cleanName[:60] + "-" + shortHash
 	}
-
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
-	if err != nil {
-		return "", "", err
-	}
-
-	// 提取标题
-	title := strings.TrimSpace(doc.Find("h1").First().Text())
-	if title == "" {
-		title = doc.Find("title").Text()
-	}
-	if title == "" {
-		title = "Untitled"
-	}
-
-	// 提取正文
-	main := doc.Find("main")
-	// 清洗干扰元素
-	main.Find("script, style, noscript, iframe, svg, button").Remove()
-	main.Find("a[class*='pagination']").Remove() // 移除底部翻页按钮
-
-	content, err := main.Html()
-	return content, title, err
-}
-
-func cleanFilename(name string) string {
-	invalid := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", "\n", "\t"}
-	for _, char := range invalid {
-		name = strings.ReplaceAll(name, char, "-")
-	}
-	return strings.TrimSpace(name)
+	return cleanName
 }
