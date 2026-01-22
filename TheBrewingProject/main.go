@@ -12,7 +12,7 @@ import (
 	"github.com/gocolly/colly/v2"
 )
 
-// 清理无效内部锚点链接，解决 Pandoc 转换 PDF 时的报错
+// 清理无效锚点，防止 PDF 报错
 func cleanInternalLinks(content string) string {
 	re := regexp.MustCompile(`\[([^\]]+)\]\(#[^\)]+\)`)
 	return re.ReplaceAllString(content, "$1")
@@ -23,63 +23,54 @@ func main() {
 	f, _ := os.Create(outputFile)
 	defer f.Close()
 
-	// 1. 写入文档元数据
+	// 写入元数据
 	f.WriteString("---\n")
-	f.WriteString("title: The Brewing Project 完整 Wiki 手册\n")
-	f.WriteString("author: 艾尔岚 (Ellan) 自动化助手\n")
+	f.WriteString("title: The Brewing Project 官方 Wiki 百科\n")
+	f.WriteString("author: 艾尔岚 (Ellan) 开发组\n")
 	f.WriteString(fmt.Sprintf("date: %s\n", time.Now().Format("2006-01-02")))
 	f.WriteString("toc: true\n")
 	f.WriteString("lang: zh-CN\n")
 	f.WriteString("---\n\n")
 
-	// 定义 Hangar 的特定参数
 	baseURL := "https://hangar.papermc.io"
-	startURL := "https://hangar.papermc.io/BreweryTeam/TheBrewingProject/pages/Wiki"
-	projectPath := "/BreweryTeam/TheBrewingProject/pages/"
+	// Hangar 页面内容通常在这个路径前缀下
+	projectPath := "/BreweryTeam/TheBrewingProject/pages"
 
 	visited := make(map[string]bool)
 	c := colly.NewCollector(
 		colly.AllowedDomains("hangar.papermc.io"),
+		// 模拟真实浏览器，防止被 Hangar 的防火墙拦截返回空页面
 		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
 	)
 
 	converter := md.NewConverter("", true, nil)
 
-	// 2. 提取正文内容
-	// Hangar 的文档主要位于 .markdown-content 或 .project-page 内
-	c.OnHTML(".project-page, .markdown-content", func(e *colly.HTMLElement) {
+	// 核心逻辑：提取 Hangar 的 Wiki 内容
+	// Hangar 的文档主要包裹在 .project-page 或 .markdown-content 中
+	c.OnHTML(".project-page, .markdown-content, .markdown-body", func(e *colly.HTMLElement) {
 		url := e.Request.URL.String()
-		if visited[url] {
-			return
-		}
+		if visited[url] { return }
 		visited[url] = true
 
-		// 提取标题：优先取正文 H1，若无则取 URL 最后一段
+		// 提取标题
 		title := e.DOM.Find("h1").First().Text()
 		if title == "" {
 			parts := strings.Split(strings.TrimSuffix(url, "/"), "/")
 			title = parts[len(parts)-1]
 		}
 		
-		fmt.Printf("正在抓取页面: %s\n", title)
+		fmt.Printf("成功抓取页面: %s\n", title)
 
-		// 修复图片路径，将相对路径转换为绝对 URL
+		// 修复相对图片路径
 		e.DOM.Find("img").Each(func(i int, s *goquery.Selection) {
-			imgSrc, exists := s.Attr("src")
-			if exists && strings.HasPrefix(imgSrc, "/") {
+			imgSrc, _ := s.Attr("src")
+			if strings.HasPrefix(imgSrc, "/") {
 				s.SetAttr("src", baseURL+imgSrc)
 			}
 		})
 
-		// 标注上下文（对 EcoBridge 处理酿酒逻辑非常有用）
-		e.DOM.Find("pre").Each(func(i int, s *goquery.Selection) {
-			s.PrependHtml(fmt.Sprintf("", title))
-		})
-
 		html, _ := e.DOM.Html()
 		markdown, _ := converter.ConvertString(html)
-		
-		// 清理导致 PDF 报错的无效内部锚点
 		finalMarkdown := cleanInternalLinks(markdown)
 
 		f.WriteString(fmt.Sprintf("# %s\n\n", title))
@@ -88,11 +79,11 @@ func main() {
 		f.WriteString("\n\n\\newpage\n\n")
 	})
 
-	// 3. 递归寻找 Wiki 页面链接（侧边栏或页面内）
+	// 关键逻辑：寻找导航栏中的所有子页面链接
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
-		// 确保只爬取该项目的 pages 目录下的链接
-		if strings.HasPrefix(link, projectPath) && !strings.Contains(link, "#") {
+		// 只要链接包含项目路径，就尝试去访问
+		if strings.Contains(link, projectPath) && !strings.Contains(link, "#") {
 			fullLink := e.Request.AbsoluteURL(link)
 			if !visited[fullLink] {
 				e.Request.Visit(fullLink)
@@ -100,8 +91,7 @@ func main() {
 		}
 	})
 
-	fmt.Println("🚀 启动 Hangar 专用爬虫...")
-	c.Visit(startURL)
+	fmt.Println("🚀 正在深度爬取 Hangar Wiki...")
+	c.Visit("https://hangar.papermc.io/BreweryTeam/TheBrewingProject/pages/Wiki")
 	c.Wait()
-	fmt.Println("✨ 抓取完成！文件已保存为:", outputFile)
 }
