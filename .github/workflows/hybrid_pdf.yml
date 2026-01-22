@@ -1,52 +1,76 @@
-name: CustomCrops Wiki to PDF
+name: CustomCrops KB to Artifact
 
 on:
   schedule:
+    # 每天北京时间上午 10:00 运行一次
     - cron: '0 2 * * *'
-  workflow_dispatch: 
+  workflow_dispatch: # 允许手动点击按钮触发
 
 permissions:
-  contents: write
+  contents: read # 只需要读取权限
 
 jobs:
-  build-pdf:
+  build-knowledge-base:
     runs-on: ubuntu-latest
+    
     steps:
+      # 1. 拉取代码
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # 2. 设置 Go 环境
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          cache: false
+          cache: false # 初始运行建议关闭，等有了稳定的 go.sum 再开启
 
-      - name: Install PDF Tools
+      # 3. 安装 PDF 转换工具和中文字体
+      - name: Install PDF Tools & Fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc python3-pip
+          sudo apt-get install -y pandoc python3-pip fonts-wqy-zenhei
           pip3 install weasyprint
-          # 安装中文字体，确保 PDF 不乱码
-          sudo apt-get install -y fonts-wqy-zenhei
 
+      # 4. 初始化依赖并运行爬虫
       - name: Run Crawler
         run: |
-          go mod init customcrops-scraper || true
+          # 自动初始化 go.mod 如果不存在
+          if [ ! -f go.mod ]; then
+            go mod init customcrops-scraper
+          fi
+          # 下载并整理依赖
           go mod tidy
+          # 运行 main.go 生成 customcrops_wiki.md
           go run main.go
+          
+          # 验证文件是否生成
+          if [ ! -f customcrops_wiki.md ]; then
+            echo "错误: customcrops_wiki.md 未生成！"
+            exit 1
+          fi
 
-      - name: Convert to PDF with TOC
+      # 5. 使用 Pandoc 转换为带目录的 PDF
+      - name: Convert Markdown to PDF
         run: |
-          # --toc 表示生成目录，--pdf-engine 使用 weasyprint 处理中文
+          # --toc 自动生成目录
+          # --pdf-engine=weasyprint 更好地支持中文 HTML 渲染
+          # -V mainfont 指定中文字体防止乱码
           pandoc customcrops_wiki.md \
             -o customcrops_wiki.pdf \
-            --toc \
-            --toc-depth=2 \
             --pdf-engine=weasyprint \
-            -V mainfont="WenQuanYi Zen Hei"
+            --toc \
+            --toc-depth=3 \
+            -V mainfont="WenQuanYi Zen Hei" \
+            -V geometry:margin=1in \
+            -V colorlinks=true
 
-      - name: Deploy PDF
-        uses: stefanzweifel/git-auto-commit-action@v5
+      # 6. 上传产物（Artifacts）
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          commit_message: "docs: update integrated PDF wiki"
-          file_pattern: 'customcrops_wiki.pdf customcrops_wiki.md go.mod go.sum'
+          name: CustomCrops-PDF-and-MD
+          path: |
+            customcrops_wiki.pdf
+            customcrops_wiki.md
+          retention-days: 14 # 在 GitHub 上保留 14 天
