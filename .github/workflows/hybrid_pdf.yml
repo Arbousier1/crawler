@@ -1,4 +1,4 @@
-name: CustomCrops KB Auto-Update
+name: CustomCrops Wiki to PDF
 
 on:
   schedule:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  build-and-scrape:
+  build-pdf:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -19,34 +19,34 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          # 关键修改：暂时关闭自动缓存，等仓库里有了 go.sum 再开启
-          cache: false 
+          cache: false
 
-      - name: Initialize and Run
+      - name: Install PDF Tools
         run: |
-          # 强制重新初始化
-          rm -f go.mod go.sum
-          go mod init customcrops-scraper
-          
-          # 下载所有必要的依赖
-          go get github.com/gocolly/colly/v2
-          go get github.com/JohannesKaufmann/html-to-markdown
-          go get github.com/PuerkitoBio/goquery
-          
-          # 整理并生成 go.sum
-          go mod tidy
-          
-          # 运行爬虫
-          mkdir -p knowledge_base
-          go run main.go
-          
-          # 检查结果
-          echo "==== 抓取结果 ===="
-          ls -R knowledge_base/
+          sudo apt-get update
+          sudo apt-get install -y pandoc python3-pip
+          pip3 install weasyprint
+          # 安装中文字体，确保 PDF 不乱码
+          sudo apt-get install -y fonts-wqy-zenhei
 
-      - name: Deploy
+      - name: Run Crawler
+        run: |
+          go mod init customcrops-scraper || true
+          go mod tidy
+          go run main.go
+
+      - name: Convert to PDF with TOC
+        run: |
+          # --toc 表示生成目录，--pdf-engine 使用 weasyprint 处理中文
+          pandoc customcrops_wiki.md \
+            -o customcrops_wiki.pdf \
+            --toc \
+            --toc-depth=2 \
+            --pdf-engine=weasyprint \
+            -V mainfont="WenQuanYi Zen Hei"
+
+      - name: Deploy PDF
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "docs(auto): initial sync of knowledge base"
-          # 确保提交所有生成的文件，包括新生成的 go.sum
-          file_pattern: 'knowledge_base/*.md go.mod go.sum'
+          commit_message: "docs: update integrated PDF wiki"
+          file_pattern: 'customcrops_wiki.pdf customcrops_wiki.md go.mod go.sum'
