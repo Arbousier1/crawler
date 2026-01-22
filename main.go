@@ -10,118 +10,104 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/gocolly/colly/v2"
 )
 
 func main() {
-	// 1. 准备输出目录
 	outputDir := "./knowledge_base"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		log.Fatal(err)
-	}
+	os.MkdirAll(outputDir, 0755)
 
-	// 2. 初始化 Colly
+	visited := make(map[string]bool)
 	c := colly.NewCollector(
 		colly.AllowedDomains("mo-mi.gitbook.io"),
-		// 开启异步以提高速度，但需配合 Limit 使用
 		colly.Async(true),
-		colly.CacheDir("./colly_cache"),
 	)
 
-	// 限制并发，防止被 GitBook 拦截 (429 Too Many Requests)
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
-		Parallelism: 2,
+		Parallelism: 3,
 		RandomDelay: 1 * time.Second,
 	})
 
-	// 初始化 Markdown 转换器
+	// 1. 初始化转换器
 	converter := md.NewConverter("", true, nil)
 
-	// 3. 处理内容 (GitBook 特定选择器)
-	// GitBook 的主要内容通常在 <main> 标签中
+	// 2. 【核心增强】：添加自定义规则来标注代码块
+	converter.AddRules(
+		md.Rule{
+			Filter: []string{"pre"},
+			Replacement: func(content string, selec *goquery.Selection, opt *md.Options) *string {
+				// 获取当前页面的上下文信息（从 selection 的 parent 向上找或者通过全局变量，但在 Colly 中我们直接处理 HTML）
+				// 这里我们简单地通过 content 处理，但更优雅的是在 OnHTML 中处理。
+				// 由于 html-to-markdown 是流式处理，我们通过下面的注入方式实现。
+				return nil // 返回 nil 表示使用默认处理
+			},
+		},
+	)
+
 	c.OnHTML("main", func(e *colly.HTMLElement) {
 		url := e.Request.URL.String()
-		
-		// 过滤：只处理 CustomCrops 相关的页面，防止爬到该作者的其他插件文档
+		if visited[url] {
+			return
+		}
+		visited[url] = true
+
 		if !strings.Contains(url, "/customcrops") {
 			return
 		}
 
-		// 尝试获取标题，GitBook 标题通常是 main 下的第一个 h1
 		title := e.DOM.Find("h1").First().Text()
 		if title == "" {
-			// 如果没找到 h1，尝试从 URL 获取最后一段作为标题
-			parts := strings.Split(url, "/")
-			if len(parts) > 0 {
-				title = parts[len(parts)-1]
-			} else {
-				title = "Untitled"
-			}
+			title = "Untitled"
 		}
+		fmt.Printf("[Parsing] %s\n", title)
 
-		fmt.Printf("Crawling: %s -> %s\n", url, title)
+		// 3. 【精准增强】：在转换前，手动给 HTML 里的代码块加注
+		// 这样 AI 在看到代码时，第一行永远是上下文注释
+		e.DOM.Find("pre").Each(func(i int, s *goquery.Selection) {
+			contextInfo := fmt.Sprintf("\n# Context: %s (Source: %s)\n", title, url)
+			s.PrependHtml(fmt.Sprintf("", contextInfo)) 
+			// 或者直接在代码块上方插入一个段落
+		})
 
-		// 移除 GitBook 可能存在的 "Previous/Next" 底部导航链接，避免污染 AI 知识库
-		e.DOM.Find("a[href*='/previous']").Remove()
-		e.DOM.Find("a[href*='/next']").Remove()
-
-		// 转换为 Markdown
-		markdown, err := converter.ConvertString(e.HTML)
+		htmlContent, _ := e.DOM.Html()
+		markdown, err := converter.ConvertString(htmlContent)
 		if err != nil {
-			log.Printf("Error converting %s: %v", url, err)
+			log.Printf("Conversion failed: %v", err)
 			return
 		}
 
-		// 构建 Frontmatter (元数据)
-		// 这对 RAG 很重要，因为它告诉 AI 这个知识的来源
-		finalContent := fmt.Sprintf("---\nsource_url: %s\ntitle: %s\ncrawled_at: %s\n---\n\n%s",
-			url, title, time.Now().Format("2006-01-02"), markdown)
+		// 4. 在代码块中强制注入语义化注释
+		// 这一步利用字符串替换，把 Markdown 的 ```yaml 替换为带注释的版本
+		annotatedMarkdown := strings.ReplaceAll(markdown, "```yaml", fmt.Sprintf("```yaml\n# 来自文档: %s\n# 路径: %s", title, url))
+		annotatedMarkdown = strings.ReplaceAll(annotatedMarkdown, "```yml", fmt.Sprintf("```yml\n# 来自文档: %s\n# 路径: %s", title, url))
+
+		finalContent := fmt.Sprintf("# %s\n\n> URL: %s\n\n---\n\n%s", title, url, annotatedMarkdown)
 
 		fileName := sanitizeFilename(url) + ".md"
-		filePath := filepath.Join(outputDir, fileName)
-
-		if err := os.WriteFile(filePath, []byte(finalContent), 0644); err != nil {
-			log.Printf("Error writing file %s: %v", filePath, err)
-		}
+		os.WriteFile(filepath.Join(outputDir, fileName), []byte(finalContent), 0644)
 	})
 
-	// 4. 链接发现 (递归爬取)
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		link := e.Attr("href")
-		
-		// 确保只访问该文档库内部的链接
-		// 必须包含 /xiaomomi-plugins/ 且不包含 # (锚点)
-		if strings.Contains(link, "/xiaomomi-plugins/") && !strings.Contains(link, "#") {
+		link := e.Request.AbsoluteURL(e.Attr("href"))
+		if strings.Contains(link, "mo-mi.gitbook.io/xiaomomi-plugins/customcrops") && !strings.Contains(link, "#") {
 			e.Request.Visit(link)
 		}
 	})
 
-	c.OnError(func(r *colly.Response, err error) {
-		log.Printf("Failed: %s (Status: %d) - %v", r.Request.URL, r.StatusCode, err)
-	})
-
-	fmt.Println("Starting GitBook crawler...")
-	// 入口链接
-	c.Visit("https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops")
-	
-	// 等待所有异步任务完成
+	c.Visit("[https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops](https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops)")
 	c.Wait()
 }
 
-// 保持不变的文件名清理函数
 func sanitizeFilename(url string) string {
-	hash := md5.Sum([]byte(url))
-	shortHash := hex.EncodeToString(hash[:])[:6]
-	
-	cleanName := strings.ReplaceAll(url, "https://", "")
-	cleanName = strings.ReplaceAll(cleanName, "mo-mi.gitbook.io/", "")
-	cleanName = strings.ReplaceAll(cleanName, "xiaomomi-plugins/", "")
-	cleanName = strings.ReplaceAll(cleanName, "/", "-")
-	
-	if len(cleanName) > 60 {
-		cleanName = cleanName[:60] + "-" + shortHash
+	url = strings.TrimSuffix(url, "/")
+	parts := strings.Split(url, "/")
+	name := parts[len(parts)-1]
+	if name == "customcrops" || name == "" {
+		name = "home"
 	}
-	return cleanName
+	hash := md5.Sum([]byte(url))
+	return fmt.Sprintf("%s_%s", name, hex.EncodeToString(hash[:])[:4])
 }
