@@ -1,4 +1,4 @@
-name: Build The Brewing Project Wiki
+name: Build The Brewing Project Wiki (V1 Compliant)
 
 on:
   schedule:
@@ -16,7 +16,8 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.24' # 匹配你当前的开发环境
+          cache: true
 
       - name: Install PDF Tools
         run: |
@@ -24,19 +25,18 @@ jobs:
           sudo apt-get install -y pandoc fonts-wqy-zenhei python3-pip
           pip3 install weasyprint
 
-      - name: Run API Scraper
+      - name: Execute Compliant Scraper
         working-directory: ./TheBrewingProject
         run: |
-          # 运行 API 爬虫，不再需要 colly 依赖
+          # 运行遵循官方准则的爬虫
           go run main.go
           
-          # 检查文件内容是否为空
           if [ ! -s TheBrewingProject_Wiki.md ]; then
-            echo "错误: 生成的 Markdown 为空，API 可能已变动"
+            echo "错误: 抓取结果为空，请检查 API 连通性"
             exit 1
           fi
 
-      - name: Convert to PDF
+      - name: Generate PDF
         working-directory: ./TheBrewingProject
         run: |
           pandoc TheBrewingProject_Wiki.md \
@@ -46,8 +46,9 @@ jobs:
             -V mainfont="WenQuanYi Zen Hei" \
             -V geometry:margin=0.8in
 
-      - name: Upload Artifact
+      - name: Upload Encyclopedia
         uses: actions/upload-artifact@v4
         with:
-          name: Brewery-Wiki-PDF
-          path: TheBrewingProject/TheBrewingProject_Wiki.pdf
+          name: Brewery-Official-Wiki
+          path: |
+            TheBrewingProject/TheBrewingProject_Wiki.pdf
