@@ -2,56 +2,40 @@ name: Build The Brewing Project Wiki
 
 on:
   schedule:
-    # 每天凌晨 3:00 (UTC) 运行
     - cron: '0 3 * * *'
-  workflow_dispatch: # 允许手动触发
-
-permissions:
-  contents: read # 产物通过 Artifacts 上传，仅需读取权限
+  workflow_dispatch: 
 
 jobs:
   build-tbp-kb:
     runs-on: ubuntu-latest
     
     steps:
-      # 1. 拉取仓库代码
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 2. 设置 Go 1.24 环境并开启缓存
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          cache: true
-          # 指向子目录下的 go.sum 文件以准确管理缓存
-          cache-dependency-path: 'TheBrewingProject/go.sum'
 
-      # 3. 安装 PDF 转换工具链与中文字体
-      - name: Install PDF Tools & Fonts
+      - name: Install PDF Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc python3-pip fonts-wqy-zenhei
+          sudo apt-get install -y pandoc fonts-wqy-zenhei python3-pip
           pip3 install weasyprint
 
-      # 4. 运行 Hangar 专用爬虫
-      - name: Run Crawler
-        # 关键：切换到 TheBrewingProject 文件夹执行
+      - name: Run API Scraper
         working-directory: ./TheBrewingProject
         run: |
-          # 自动初始化并整理 Go 依赖
-          go mod tidy || (go mod init hangar-scraper && go mod tidy)
-          # 运行爬虫（假设你的代码文件名为 main.go 或 hangar_crawler.go）
-          # 这里使用 main.go，请根据实际文件名修改
+          # 运行 API 爬虫，不再需要 colly 依赖
           go run main.go
           
-          # 验证文件是否生成
-          if [ ! -f TheBrewingProject_Wiki.md ]; then
-            echo "Error: TheBrewingProject_Wiki.md was not generated!"
+          # 检查文件内容是否为空
+          if [ ! -s TheBrewingProject_Wiki.md ]; then
+            echo "错误: 生成的 Markdown 为空，API 可能已变动"
             exit 1
           fi
 
-      # 5. 使用 Pandoc 将 Markdown 转换为 PDF
       - name: Convert to PDF
         working-directory: ./TheBrewingProject
         run: |
@@ -59,18 +43,11 @@ jobs:
             -o TheBrewingProject_Wiki.pdf \
             --pdf-engine=weasyprint \
             --toc \
-            --toc-depth=3 \
             -V mainfont="WenQuanYi Zen Hei" \
-            -V geometry:margin=0.8in \
-            -V colorlinks=true \
-            --metadata=title:"The Brewing Project 完整 Wiki 手册"
+            -V geometry:margin=0.8in
 
-      # 6. 上传产物
-      - name: Upload Artifacts
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: The-Brewing-Project-Wiki
-          path: |
-            TheBrewingProject/TheBrewingProject_Wiki.pdf
-            TheBrewingProject/TheBrewingProject_Wiki.md
-          retention-days: 30
+          name: Brewery-Wiki-PDF
+          path: TheBrewingProject/TheBrewingProject_Wiki.pdf
