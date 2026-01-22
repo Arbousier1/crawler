@@ -1,0 +1,166 @@
+# ⚙️ config.yml
+
+> URL: https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops/plugin-wiki/customcrops/format/config.yml
+> Exported: 2026-01-22
+
+---
+
+copyCopychevron-down
+
+1. [Plugin Wiki](/xiaomomi-plugins/customcrops/plugin-wiki) chevron-right
+2. [🍅 CustomCrops](/xiaomomi-plugins/customcrops) chevron-right
+3. [📄 Format](/xiaomomi-plugins/customcrops/plugin-wiki/customcrops/format)
+
+# ⚙️ config.yml
+
+Copy
+
+```inline-grid min-w-full grid-cols-[auto_1fr] [count-reset:line] print:whitespace-pre-wrap
+%!(EXTRA string=⚙️ config.yml, string=https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops/plugin-wiki/customcrops/format/config.yml)# Do not change this value
+config-version: '${config_version}'
+# Enable or disable debugging mode
+debug: false
+# Enable or disable metrics collection using BStats
+metrics: true
+# Enable automatic update checks
+update-checker: true
+# Force the locale (e.g., zh_cn)
+force-locale: ''
+# World settings
+worlds:
+  # Some servers use separate directories for player worlds, which may not be in the server's root directory.
+  # This option allows you to specify a custom path to these world folders. This is only applicable for Bukkit worlds.
+  absolute-world-folder-path: ''
+  # Specifies which worlds the plugin's mechanisms should apply to
+  # Options: whitelist/blacklist/regex
+  mode: blacklist
+  list:
+    - blacklist_world # A world that doesn't exist
+  settings:
+    # Default settings that apply to all worlds
+    _DEFAULT_:
+      # Whether to enable the plugin's pre-configured systems
+      # Disabling this stops all mechanisms from ticking unless fully managed via the API.
+      # If you're not familiar with using CustomCropsAPI, keep this set to true as it meets the needs of 99% of users.
+      enable: true
+      # Seasonal settings
+      season:
+        enable: true
+        # Automatically cycle through seasons
+        auto-alternation: true
+        # Duration of each season in game days
+        duration: 28
+      # This is different from the vanilla RandomTickSpeed.
+      # "Random tick" here means randomly selecting n blocks within a 16x16x16 section every second for ticking, unlike Minecraft's per-tick approach.
+      # Therefore, CustomCrops' random ticks have minimal impact on the server and run on multiple threads.
+      random-tick-speed: 20
+      # The minimum tick interval in seconds when using scheduled tick mode
+      # A value of 180s means a crop is guaranteed to tick at least once every 180 seconds
+      # For crops, growth rates are nearly uniform under the same conditions
+      # Sprinklers and pots operate periodically within this interval.
+      min-tick-unit: 180
+      # Settings for ticking while the world is offline
+      # Allows crops to grow even if the world is unloaded or the server is down
+      # This might cause issues with time-dependent conditions like seasons
+      offline-tick:
+        enable: false
+        # Maximum offline time recorded in seconds
+        # Avoid setting this too high, as it may cause long-unloaded chunks to take a long time to load
+        max-offline-seconds: 1200
+        # Maximum time allowed for loading a chunk
+        # Sometimes, chunks with large amounts of data that have been unloaded for a long time can take a while to load,
+        # potentially causing unexpected issues
+        # This setting allows the plugin to forcibly interrupt the tick process if loading time exceeds a set threshold
+        max-loading-time: 100 #ms
+      # Crop settings
+      crop:
+        # [RANDOM_TICK]
+        # Random tick mode mirrors vanilla behavior, where crops grow randomly
+        # This randomness can cause significant stage differences among crops grown under identical conditions
+        # [SCHEDULED_TICK]
+        # Scheduled tick mode provides more predictable growth management,
+        # ensuring crops grow at nearly the same rate
+        mode: RANDOM_TICK
+        # Tick interval determines how many times a block is ticked before its logic is executed
+        tick-interval: 1
+        # Limit the number of crops per chunk (-1 means no limit)
+        max-per-chunk: -1
+      # Pot settings
+      pot:
+        # RANDOM_TICK or SCHEDULED_TICK
+        mode: SCHEDULED_TICK
+        tick-interval: 3
+        max-per-chunk: -1
+      # Sprinkler settings
+      sprinkler:
+        # RANDOM_TICK or SCHEDULED_TICK
+        mode: SCHEDULED_TICK
+        tick-interval: 2
+        max-per-chunk: -1
+    # Override default settings for specific worlds here
+    _WORLDS_:
+      world_nether:
+        enable: false
+      world_the_end:
+        enable: false
+# Mechanics settings
+mechanics:
+  # Create additional ranks by adding more slashes, e.g., x/x/x/x/x
+  # "x" represents weight, which determines the probability proportion
+  # 17/2/1 = 85%/10%/5%
+  # 85% is calculated as 17/(17+2+1) * 100%
+  default-quality-ratio: 17/2/1
+  # Scarecrow settings to prevent crops from being attacked by crows
+  scarecrow:
+    enable: true
+    id: 'scarecrow'
+    type: ITEM_FRAME
+    range: 7
+    # If enabled, the scarecrow's range will not be limited
+    # It will protect all crops within the same chunk
+    protect-chunk: false
+  # Greenhouse glass prevents crops from withering due to seasonal changes
+  greenhouse:
+    enable: true
+    # You can use a list of IDs here; vanilla blocks are also supported
+    id: 'greenhouse_glass'
+    type: CHORUS
+    range: 5
+  # Synchronize seasons with another world
+  sync-season:
+    enable: false
+    reference: world
+  # Vanilla farmland mechanics
+  vanilla-farmland:
+    # Disable the moisture mechanics of vanilla farmland
+    # This is useful if you prefer vanilla farmland but the water system conflicts with vanilla mechanics
+    disable-moisture-mechanic: false
+    # Prevent entities from trampling farmland
+    prevent-trampling: false
+  # Set hologram offset correction for different blocks
+  hologram-offset-correction:
+    "crop_stage_death": 0
+  # Specify block types that should be overridden by the plugin
+  # Some common crops: WHEAT/CARROTS/POTATOES/BEETROOTS/SWEET_BERRY_BUSH
+  override-vanilla-blocks: []
+other-settings:
+  # It is recommended to use MiniMessage format. If you want to use legacy color codes ("&"), enable support below.
+  # Disabling this can improve performance
+  legacy-color-code-support: true
+  # Requires PlaceholderAPI to function
+  placeholder-register:
+    '{skill-level}': '%levelplugin_farming%'
+  # To use items from other plugins
+  item-detection-order: []
+  # Whether to protect the original lore of items
+  # Uses the scoreboard component to identify the plugin's lore,
+  # which may conflict with some plugins still using SpigotAPI#ItemMeta
+  protect-original-lore: false
+  # Whether to verify if a block/furniture matches the data in CustomCrops
+  # Enable this if using Oraxen, as its API is more reliable
+  double-check: false
+```
+
+[Previous💩 Fertilizerchevron-left](/xiaomomi-plugins/customcrops/plugin-wiki/customcrops/format/fertilizer) [Next💪 Actionchevron-right](/xiaomomi-plugins/customcrops/plugin-wiki/customcrops/action)
+
+Last updated 1 year ago
