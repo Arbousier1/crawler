@@ -4,7 +4,6 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +20,6 @@ func main() {
 
 	visited := make(map[string]bool)
 	c := colly.NewCollector(
-		// 稍微放宽域名限制，有时跳转会带上不同的后缀
 		colly.AllowedDomains("mo-mi.gitbook.io", "gitbook.io"),
 		colly.Async(true),
 		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"),
@@ -49,20 +47,27 @@ func main() {
 		
 		fmt.Printf("成功发现页面: %s\n", title)
 
-		// 给代码块注入上下文
+		// 注入上下文注释到 HTML 的 pre 标签中
 		e.DOM.Find("pre").Each(func(i int, s *goquery.Selection) {
-			s.PrependHtml(fmt.Sprintf("", title))
+			s.PrependHtml(fmt.Sprintf("", title, url))
 		})
 
-		htmlContent, _ := e.DOM.Html()
+		htmlContent, err := e.DOM.Html()
+		if err != nil {
+			return
+		}
+
 		markdown, err := converter.ConvertString(htmlContent)
 		if err != nil {
 			return
 		}
 
-		// 注入 AI 识别标签
-		annotated := strings.ReplaceAll(markdown, "```yaml", fmt.Sprintf("```yaml\n# Source: %s", url))
-		final := fmt.Sprintf("# %s\n\n> URL: %s\n\n%s", title, url, annotated)
+		// 增强：给 Markdown 代码块块首添加语义化注释
+		annotated := strings.ReplaceAll(markdown, "```yaml", fmt.Sprintf("```yaml\n# 来自文档: %s\n# 原始链接: %s", title, url))
+		annotated = strings.ReplaceAll(annotated, "```yml", fmt.Sprintf("```yml\n# 来自文档: %s\n# 原始链接: %s", title, url))
+
+		final := fmt.Sprintf("# %s\n\n> URL: %s\n> Exported: %s\n\n---\n\n%s", 
+			title, url, time.Now().Format("2006-01-02"), annotated)
 
 		fileName := sanitizeFilename(url) + ".md"
 		os.WriteFile(filepath.Join(outputDir, fileName), []byte(final), 0644)
@@ -70,21 +75,24 @@ func main() {
 
 	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
 		link := e.Request.AbsoluteURL(e.Attr("href"))
-		// 关键：确保递归逻辑正确，只在 customcrops 路径下爬取
 		if strings.Contains(link, "mo-mi.gitbook.io/xiaomomi-plugins/customcrops") && !strings.Contains(link, "#") {
 			e.Request.Visit(link)
 		}
 	})
 
-	fmt.Println("开始爬取 GitBook...")
+	fmt.Println("🚀 开始爬取 GitBook 并构建 AI 知识库...")
 	c.Visit("https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops")
 	c.Wait()
+	fmt.Println("✨ 导出完成！")
 }
 
 func sanitizeFilename(url string) string {
 	url = strings.TrimSuffix(url, "/")
 	parts := strings.Split(url, "/")
 	name := parts[len(parts)-1]
+	if name == "customcrops" || name == "" {
+		name = "home"
+	}
 	hash := md5.Sum([]byte(url))
 	return fmt.Sprintf("%s_%s", name, hex.EncodeToString(hash[:])[:4])
 }
