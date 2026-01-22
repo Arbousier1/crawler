@@ -20,47 +20,13 @@ import (
 )
 
 const (
-	// 更新为 GitBook 地址
 	BaseURL       = "https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops"
 	OutDir        = "dist"
 	FinalPDF      = "MOMI_CustomCrops_Wiki.pdf"
-	MaxConcurrent = 3 // GitBook 比较稳定，可以稍微提高并发
+	// 稳定性核心：在 GitHub Actions 中建议设为 1 或 2，防止浏览器崩溃
+	MaxConcurrent = 1 
 	UserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
-
-// GitBook 专属净化脚本
-const CleanScript = `
-	(function() {
-		// 移除侧边栏、顶部导航头、右侧反馈按钮等
-		const selectors = [
-			'header', 
-			'nav', 
-			'[role="navigation"]', 
-			'#feedback-buoy', 
-			'footer',
-			'.css-175oi2r.r-13awgt0.r-1777fci' // 常见的 GitBook 遮罩/页脚类
-		];
-		selectors.forEach(s => document.querySelectorAll(s).forEach(e => e.remove()));
-
-		// 强制内容区域占满全屏
-		const main = document.querySelector('main');
-		if(main) {
-			main.style.width = '100%';
-			main.style.maxWidth = 'none';
-			main.style.margin = '0';
-			main.style.padding = '20px';
-		}
-
-		// 移除可能存在的最大宽度限制
-		document.querySelectorAll('div').forEach(div => {
-			if (window.getComputedStyle(div).maxWidth !== 'none') {
-				div.style.maxWidth = 'none';
-			}
-		});
-
-		document.body.style.backgroundColor = 'white';
-	})();
-`
 
 func main() {
 	start := time.Now()
@@ -71,6 +37,7 @@ func main() {
 		chromedp.Flag("headless", "new"),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-gpu", true),
 		chromedp.UserAgent(UserAgent),
 	)
 
@@ -81,11 +48,11 @@ func main() {
 	uniqueUrls := scanLinksDeep(allocCtx)
 	
 	if len(uniqueUrls) == 0 {
-		fmt.Println("❌ 错误：未能从 GitBook 获取任何有效链接。")
+		fmt.Println("❌ 错误：未能获取有效链接。")
 		os.Exit(1)
 	}
 
-	fmt.Printf("✅ 发现 %d 个文档页面，开始生成 PDF...\n", len(uniqueUrls))
+	fmt.Printf("✅ 发现 %d 个文档页面，开始串行稳定渲染...\n", len(uniqueUrls))
 
 	taskChan := make(chan Task, len(uniqueUrls))
 	resChan := make(chan Result, len(uniqueUrls))
@@ -109,19 +76,80 @@ func main() {
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
 
+	if len(results) == 0 {
+		fmt.Println("❌ 错误：所有页面渲染均失败，无法合并。")
+		os.Exit(1)
+	}
+
 	mergePDFs(results)
-	fmt.Printf("\n🏆 完成！耗时: %s | 输出: %s\n", time.Since(start), FinalPDF)
+	fmt.Printf("\n🏆 完成！成功渲染 %d/%d 页 | 耗时: %s\n", len(results), len(uniqueUrls), time.Since(start))
 }
 
-func scanLinksDeep(ctx context.Context, ) []string {
-	ctx, cancel := chromedp.NewContext(ctx)
-	defer cancel()
+func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	for t := range tasks {
+		success := false
+		var buf []byte
+		
+		// 自动重试机制：最多尝试 3 次
+		for attempt := 1; attempt <= 3; attempt++ {
+			if attempt > 1 {
+				fmt.Printf("🔄 [%d] 正在进行第 %d 次重试...\n", t.ID, attempt)
+				time.Sleep(2 * time.Second)
+			}
+
+			// 为每次渲染创建完全独立的 Context，防止互相干扰
+			ctx, cancel := chromedp.NewContext(parentCtx)
+			tCtx, tCancel := context.WithTimeout(ctx, 60*time.Second)
+			
+			err := chromedp.Run(tCtx,
+				network.Enable(),
+				chromedp.Navigate(t.URL),
+				// GitBook 加载较慢，等待 body 出现即可
+				chromedp.WaitReady("body"),
+				chromedp.Sleep(5*time.Second), // 留出足够时间给动态内容
+				chromedp.Evaluate(CleanScript, nil),
+				chromedp.ActionFunc(func(ctx context.Context) error {
+					var err error
+					buf, _, err = page.PrintToPDF().
+						WithPrintBackground(true).
+						WithPaperWidth(8.27).
+						WithPaperHeight(11.69).
+						Do(ctx)
+					return err
+				}),
+			)
+			tCancel()
+			cancel() // 渲染完立即释放浏览器 Tab 内存
+
+			if err == nil {
+				success = true
+				break
+			}
+			fmt.Printf("⚠️ [%d] 尝试 %d 失败: %v\n", t.ID, attempt, err)
+		}
+
+		if success {
+			path := filepath.Join(OutDir, fmt.Sprintf("%03d.pdf", t.ID))
+			os.WriteFile(path, buf, 0644)
+			results <- Result{ID: t.ID, Path: path}
+			fmt.Printf("📄 [%d] 渲染成功: %s\n", t.ID, t.URL)
+		} else {
+			fmt.Printf("❌ [%d] 最终渲染失败: %s\n", t.ID, t.URL)
+		}
+	}
+}
+
+func scanLinksDeep(ctx context.Context) []string {
+	// 扫描使用独立的 Context
+	sCtx, sCancel := chromedp.NewContext(ctx)
+	defer sCancel()
 	
 	visited := make(map[string]bool)
 	var links []string
 	queue := []string{BaseURL}
 	targetHost := "mo-mi.gitbook.io"
-	basePath := "/xiaomomi-plugins/customcrops"
 
 	for len(queue) > 0 {
 		curr := queue[0]
@@ -134,14 +162,14 @@ func scanLinksDeep(ctx context.Context, ) []string {
 		if visited[cleanURL] { continue }
 		visited[cleanURL] = true
 
-		fmt.Printf("🔗 正在探测: %s\n", cleanURL)
+		fmt.Printf("🔗 正在扫描: %s\n", cleanURL)
 
 		var res []string
-		tCtx, tCancel := context.WithTimeout(ctx, 40*time.Second)
+		tCtx, tCancel := context.WithTimeout(sCtx, 30*time.Second)
 		err := chromedp.Run(tCtx, 
 			chromedp.Navigate(curr),
 			chromedp.WaitReady("body"),
-			chromedp.Sleep(3*time.Second), // 等待 GitBook 加载侧边栏
+			chromedp.Sleep(3*time.Second),
 			chromedp.Evaluate(`
 				Array.from(document.querySelectorAll('a[href]'))
 					.map(a => a.href)
@@ -150,7 +178,7 @@ func scanLinksDeep(ctx context.Context, ) []string {
 		tCancel()
 
 		if err != nil {
-			fmt.Printf("⚠️ 跳过页面: %v\n", err)
+			fmt.Printf("⚠️ 扫描页面出错 (跳过): %v\n", err)
 			continue
 		}
 
@@ -158,15 +186,14 @@ func scanLinksDeep(ctx context.Context, ) []string {
 			parsed, err := url.Parse(l)
 			if err != nil { continue }
 
-			// 检查是否属于同一个 GitBook 项目
-			if parsed.Host == targetHost && strings.HasPrefix(parsed.Path, basePath) {
+			if parsed.Host == targetHost && strings.Contains(parsed.Path, "customcrops") {
 				parsed.Fragment = ""
 				parsed.RawQuery = ""
 				full := strings.TrimSuffix(parsed.String(), "/")
 
 				if !visited[full] {
 					links = append(links, full)
-					queue = append(queue, full) // 递归抓取侧边栏里的所有链接
+					queue = append(queue, full)
 				}
 			}
 		}
@@ -174,53 +201,29 @@ func scanLinksDeep(ctx context.Context, ) []string {
 	return uniqueAndSort(links)
 }
 
-func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result, wg *sync.WaitGroup) {
-	defer wg.Done()
-	ctx, cancel := chromedp.NewContext(parentCtx)
-	defer cancel()
+const CleanScript = `
+	(function() {
+		// 彻底移除干扰元素
+		const selectors = ['header', 'nav', '[role="navigation"]', '#feedback-buoy', 'footer', 'iframe'];
+		selectors.forEach(s => document.querySelectorAll(s).forEach(e => e.remove()));
 
-	for t := range tasks {
-		var buf []byte
-		tCtx, tCancel := context.WithTimeout(ctx, 60*time.Second)
-		err := chromedp.Run(tCtx,
-			network.Enable(),
-			chromedp.Navigate(t.URL),
-			chromedp.WaitVisible("main", chromedp.ByQuery),
-			chromedp.Sleep(2*time.Second),
-			chromedp.Evaluate(CleanScript, nil),
-			chromedp.ActionFunc(func(ctx context.Context) error {
-				var err error
-				buf, _, err = page.PrintToPDF().
-					WithPrintBackground(true).
-					WithPaperWidth(8.27).
-					WithPaperHeight(11.69).
-					Do(ctx)
-				return err
-			}),
-		)
-		tCancel()
-
-		if err != nil {
-			fmt.Printf("❌ [%d] 渲染失败: %s\n", t.ID, t.URL)
-			continue
+		const main = document.querySelector('main');
+		if(main) {
+			main.style.width = '100%';
+			main.style.maxWidth = 'none';
+			main.style.margin = '0';
+			main.style.padding = '30px';
 		}
-
-		path := filepath.Join(OutDir, fmt.Sprintf("%03d.pdf", t.ID))
-		os.WriteFile(path, buf, 0644)
-		results <- Result{ID: t.ID, Path: path}
-		fmt.Printf("📄 [%d] 已生成: %s\n", t.ID, t.URL)
-	}
-}
+		document.body.style.backgroundColor = 'white';
+	})();
+`
 
 func mergePDFs(results []Result) {
-	if len(results) == 0 { return }
 	var inFiles []string
 	for _, r := range results { inFiles = append(inFiles, r.Path) }
 	conf := model.NewDefaultConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed 
-	if err := api.MergeCreateFile(inFiles, FinalPDF, false, conf); err != nil {
-		log.Printf("❌ 合并出错: %v", err)
-	}
+	api.MergeCreateFile(inFiles, FinalPDF, false, conf)
 }
 
 func uniqueAndSort(slice []string) []string {
