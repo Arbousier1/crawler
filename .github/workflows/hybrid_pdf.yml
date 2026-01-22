@@ -1,7 +1,7 @@
-name: Hybrid Wiki PDF Export
+name: AI-Optimized Wiki PDF Builder
 
 on:
-  workflow_dispatch: # 支持手动点击按钮触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -14,37 +14,46 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.21'
+          go-version: '1.24' # 使用最新版 Go 以支持最新的 chromedp
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Chrome and Dependencies
+      - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y google-chrome-stable
-          pip install -r python_finisher/requirements.txt
+          sudo apt-get install -y google-chrome-stable ghostscript
+          pip install pymupdf
 
-      - name: Execute Go Crawler
+      - name: Step 1 - Go Crawler (Extreme Scrape)
         run: |
           cd go_crawler
-          # 自动解决 go.mod 和 go.sum 依赖问题
-          rm -f go.mod go.sum
+          rm -rf go.mod go.sum
           go mod init wiki-crawler
-          go get github.com/chromedp/chromedp
-          go get github.com/chromedp/cdproto/page
           go mod tidy
           go run main.go
 
-      - name: Execute Python Finisher
+      - name: Step 2 - Python Finisher (ToC & Clean)
         run: |
-          # Go 运行后会在根目录产出 metadata.json 和 temp_pdfs 文件夹
+          # 运行合并并执行初步的对象清理
           python python_finisher/merge.py
 
-      - name: Upload Final PDF
+      - name: Step 3 - Ghostscript (Extreme AI Compression)
+        run: |
+          # 使用 Ghostscript 强制下采样图像到 60dpi，并剔除所有非文字冗余
+          gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 \
+             -dPDFSETTINGS=/screen \
+             -dNOPAUSE -dQUIET -dBATCH \
+             -dColorImageDownsampleType=/Bicubic -dColorImageResolution=60 \
+             -dGrayImageDownsampleType=/Bicubic -dGrayImageResolution=60 \
+             -dMonoImageDownsampleType=/Bicubic -dMonoImageResolution=60 \
+             -sOutputFile=Wiki_For_AI_Optimized.pdf \
+             Wiki_Raw_Merged.pdf
+
+      - name: Upload AI-Ready PDF
         uses: actions/upload-artifact@v4
         with:
-          name: Wiki-Perfect-PDF
-          path: Craft_Engine_Wiki_Perfect.pdf
+          name: AI-Wiki-Data
+          path: Wiki_For_AI_Optimized.pdf
