@@ -22,17 +22,15 @@ const (
 	BaseURL       = "https://xiao-momi.github.io/craft-engine-wiki/"
 	OutDir        = "dist"
 	FinalPDF      = "Wiki_Full_Dump.pdf"
-	MaxConcurrent = 4 // 保持稳定
+	MaxConcurrent = 4
 )
 
-// 净化脚本：保留图片，删除导航
 const CleanScript = `
 	document.querySelectorAll('nav, .sidebar, .navbar, footer, script, iframe, .theme-container > .navbar').forEach(e => e.remove());
 	document.querySelectorAll('details').forEach(e => e.open = true);
 	document.body.style.padding = '0px';
 	document.body.style.margin = '20px';
 	document.body.style.backgroundColor = 'white';
-	// 尝试移除 VuePress/VitePress 的遮罩
 	document.querySelectorAll('.sidebar-mask').forEach(e => e.remove());
 `
 
@@ -51,32 +49,27 @@ func main() {
 	os.RemoveAll(OutDir)
 	os.MkdirAll(OutDir, 0755)
 
-	// 1. 浏览器配置 (关键：设置大窗口)
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", "new"),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
-		// 【关键修复】强制 1920x1080，防止侧边栏被折叠
 		chromedp.WindowSize(1920, 1080),
 	)
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 
-	// 2. 深度递归扫描
 	fmt.Println("🕷️ 启动深度爬虫 (Breadth-First Search)...")
 	urls := crawlAllPages(allocCtx)
 	
-	// 再次去重，确保万无一失
 	uniqueUrls := uniqueAndSort(urls)
-	fmt.Printf("✅ 最终捕获: %d 个唯一页面 (准备渲染)\n", len(uniqueUrls))
+	fmt.Printf("✅ 最终捕获: %d 个唯一页面\n", len(uniqueUrls))
 
 	if len(uniqueUrls) == 0 {
-		log.Fatal("❌ 未找到任何页面，请检查 BaseURL 是否可访问")
+		log.Fatal("❌ 未找到任何页面")
 	}
 
-	// 3. 并发渲染
 	taskChan := make(chan Task, len(uniqueUrls))
 	resChan := make(chan Result, len(uniqueUrls))
 	var wg sync.WaitGroup
@@ -93,7 +86,6 @@ func main() {
 	wg.Wait()
 	close(resChan)
 
-	// 4. 合并
 	var results []Result
 	for r := range resChan {
 		results = append(results, r)
@@ -105,41 +97,30 @@ func main() {
 	os.RemoveAll(OutDir)
 }
 
-// crawlAllPages 实现了真正的 BFS (广度优先搜索)
 func crawlAllPages(rootCtx context.Context) []string {
-	// 创建一个独立的 browser context 用于爬取
 	ctx, cancel := chromedp.NewContext(rootCtx)
 	defer cancel()
 
-	// 待爬队列
 	queue := []string{BaseURL}
-	// 已发现集合 (用于去重)
 	seen := make(map[string]bool)
 	seen[BaseURL] = true
-	// 结果列表
 	var results []string
 
-	// 限制最大深度防止死循环 (Wiki一般不超过5层，但这里按数量限制更安全)
-	// 或者只要队列不空就一直爬
 	for len(queue) > 0 {
-		// 取出队首
 		currentURL := queue[0]
 		queue = queue[1:]
 		
 		results = append(results, currentURL)
 		fmt.Printf("🔍 扫描中 [%d Found]: %s\n", len(results), currentURL)
 
-		// 提取该页面上的所有新链接
 		newLinks := extractLinks(ctx, currentURL)
 		
 		for _, link := range newLinks {
-			// 规范化链接：去掉锚点，去掉尾部斜杠
 			u, err := url.Parse(link)
 			if err != nil { continue }
 			u.Fragment = ""
 			normalizedLink := strings.TrimSuffix(u.String(), "/")
 
-			// 必须是站内链接，且未被发现过
 			if strings.HasPrefix(normalizedLink, BaseURL) && !seen[normalizedLink] {
 				seen[normalizedLink] = true
 				queue = append(queue, normalizedLink)
@@ -150,23 +131,18 @@ func crawlAllPages(rootCtx context.Context) []string {
 }
 
 func extractLinks(ctx context.Context, targetURL string) []string {
-	// 设置超时，防止某个页面卡死
-	tCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	tCtx, cancel := context.WithTimeout(ctx, 20*time.Second) // 增加超时防止卡死
 	defer cancel()
 
 	var res []string
 	err := chromedp.Run(tCtx,
 		chromedp.Navigate(targetURL),
-		// 等待侧边栏加载 (VuePress 常见的选择器)
 		chromedp.WaitReady("body"),
-		// 稍微睡一下，等 JS 渲染侧边栏
 		chromedp.Sleep(1*time.Second),
-		// 抓取所有链接
 		chromedp.Evaluate(`Array.from(document.querySelectorAll('a[href]')).map(a => a.href)`, &res),
 	)
 	
 	if err != nil {
-		// 超时或出错也不要 panic，直接返回空，继续下一个
 		fmt.Printf("⚠️ 无法扫描页面: %s (%v)\n", targetURL, err)
 		return []string{}
 	}
@@ -178,23 +154,25 @@ func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result,
 	ctx, cancel := chromedp.NewContext(parentCtx)
 	defer cancel()
 
-	// 拦截无用资源 (只拦截字体和视频，保留图片)
 	chromedp.Run(ctx, network.Enable(), network.SetBlockedURLs([]string{
 		"*.woff", "*.woff2", "*.ttf", "*.otf", "*.mp4", "*google-analytics*",
 	}))
 
 	for t := range tasks {
-		var buf []byte
+		var buf []byte // 这里声明了外部变量
 		tCtx, tCancel := context.WithTimeout(ctx, 45*time.Second)
 		
 		err := chromedp.Run(tCtx,
 			chromedp.Navigate(t.URL),
 			chromedp.WaitReady("body"),
-			chromedp.Sleep(1500*time.Millisecond), // 等图片
+			chromedp.Sleep(1500*time.Millisecond),
 			chromedp.Evaluate(CleanScript, nil),
 			chromedp.ActionFunc(func(ctx context.Context) error {
-				buf, _, err := page.PrintToPDF().
-					WithPrintBackground(false). // 不打印背景
+				var err error
+				// 【修复点】：使用 = 而不是 :=，并显式声明 err
+				// 这样数据才会写入到外部的 buf 中
+				buf, _, err = page.PrintToPDF().
+					WithPrintBackground(false).
 					WithPaperWidth(8.27).WithPaperHeight(11.69).
 					WithMarginTop(0.3).WithMarginBottom(0.3).
 					WithMarginLeft(0.3).WithMarginRight(0.3).
