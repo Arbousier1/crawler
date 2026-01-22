@@ -25,6 +25,7 @@ const (
 	MaxConcurrent = 4
 )
 
+// CleanScript removes navigation, sidebar, footer, etc.
 const CleanScript = `
 	document.querySelectorAll('nav, .sidebar, .navbar, footer, script, iframe, .theme-container > .navbar').forEach(e => e.remove());
 	document.querySelectorAll('details').forEach(e => e.open = true);
@@ -49,101 +50,130 @@ func main() {
 	os.RemoveAll(OutDir)
 	os.MkdirAll(OutDir, 0755)
 
+	// Configure Chrome
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", "new"),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
+		// Key fix: Large window size to ensure sidebar links are rendered
 		chromedp.WindowSize(1920, 1080),
 	)
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 
-	fmt.Println("🕷️ 启动深度爬虫 (Breadth-First Search)...")
+	fmt.Println("🕷️ Starting BFS Crawler (Recursive Scan)...")
+	
+	// Step 1: Recursively crawl all links
 	urls := crawlAllPages(allocCtx)
 	
+	// Deduplicate and sort
 	uniqueUrls := uniqueAndSort(urls)
-	fmt.Printf("✅ 最终捕获: %d 个唯一页面\n", len(uniqueUrls))
+	fmt.Printf("✅ Final Count: %d unique pages found.\n", len(uniqueUrls))
 
 	if len(uniqueUrls) == 0 {
-		log.Fatal("❌ 未找到任何页面")
+		log.Fatal("❌ No pages found. Check network or BaseURL.")
 	}
 
+	// Step 2: Concurrent Rendering
 	taskChan := make(chan Task, len(uniqueUrls))
 	resChan := make(chan Result, len(uniqueUrls))
 	var wg sync.WaitGroup
 
+	// Start workers
 	for i := 0; i < MaxConcurrent; i++ {
 		wg.Add(1)
 		go worker(allocCtx, taskChan, resChan, &wg)
 	}
 
+	// Send tasks
 	for i, u := range uniqueUrls {
 		taskChan <- Task{ID: i, URL: u}
 	}
 	close(taskChan)
+
+	// Wait for completion
 	wg.Wait()
 	close(resChan)
 
+	// Step 3: Collect results
 	var results []Result
 	for r := range resChan {
 		results = append(results, r)
 	}
+	// Sort by ID to maintain scan order
 	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
 
+	// Step 4: Merge
 	mergePDFs(results)
-	fmt.Printf("🏆 完成！耗时: %s | 文件: %s\n", time.Since(start), FinalPDF)
+
+	fmt.Printf("🏆 Done! Duration: %s | File: %s\n", time.Since(start), FinalPDF)
 	os.RemoveAll(OutDir)
 }
 
+// crawlAllPages implements a Breadth-First Search to find all links
 func crawlAllPages(rootCtx context.Context) []string {
+	// Use a separate context for crawling to avoid interference
 	ctx, cancel := chromedp.NewContext(rootCtx)
 	defer cancel()
 
+	// Queue for BFS
 	queue := []string{BaseURL}
-	seen := make(map[string]bool)
-	seen[BaseURL] = true
-	var results []string
+	
+	// Track visited URLs to prevent cycles
+	visited := make(map[string]bool)
+	visited[BaseURL] = true
+	
+	// List of all discovered URLs in order
+	var allLinks []string
 
 	for len(queue) > 0 {
+		// Pop the first URL
 		currentURL := queue[0]
 		queue = queue[1:]
 		
-		results = append(results, currentURL)
-		fmt.Printf("🔍 扫描中 [%d Found]: %s\n", len(results), currentURL)
+		allLinks = append(allLinks, currentURL)
+		fmt.Printf("🔍 Scanning [%d found]: %s\n", len(allLinks), currentURL)
 
-		newLinks := extractLinks(ctx, currentURL)
+		// Extract links from the current page
+		foundLinks := extractLinks(ctx, currentURL)
 		
-		for _, link := range newLinks {
+		for _, link := range foundLinks {
+			// Normalize link: remove fragment, trailing slash
 			u, err := url.Parse(link)
 			if err != nil { continue }
 			u.Fragment = ""
-			normalizedLink := strings.TrimSuffix(u.String(), "/")
+			normalized := strings.TrimSuffix(u.String(), "/")
 
-			if strings.HasPrefix(normalizedLink, BaseURL) && !seen[normalizedLink] {
-				seen[normalizedLink] = true
-				queue = append(queue, normalizedLink)
+			// Check if it's internal and not visited
+			if strings.HasPrefix(normalized, BaseURL) && !visited[normalized] {
+				visited[normalized] = true
+				queue = append(queue, normalized)
 			}
 		}
 	}
-	return results
+	return allLinks
 }
 
 func extractLinks(ctx context.Context, targetURL string) []string {
-	tCtx, cancel := context.WithTimeout(ctx, 20*time.Second) // 增加超时防止卡死
+	// Set a timeout for each page scan
+	tCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
 	var res []string
 	err := chromedp.Run(tCtx,
 		chromedp.Navigate(targetURL),
+		// Wait for body to ensure DOM is loaded
 		chromedp.WaitReady("body"),
-		chromedp.Sleep(1*time.Second),
+		// Small sleep to allow JS frameworks (VuePress/React) to render sidebar
+		chromedp.Sleep(500*time.Millisecond),
+		// Extract all hrefs
 		chromedp.Evaluate(`Array.from(document.querySelectorAll('a[href]')).map(a => a.href)`, &res),
 	)
 	
 	if err != nil {
-		fmt.Printf("⚠️ 无法扫描页面: %s (%v)\n", targetURL, err)
+		fmt.Printf("⚠️ Failed to scan %s: %v\n", targetURL, err)
 		return []string{}
 	}
 	return res
@@ -154,25 +184,25 @@ func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result,
 	ctx, cancel := chromedp.NewContext(parentCtx)
 	defer cancel()
 
+	// Block fonts and media to save bandwidth, but ALLOW images/css
 	chromedp.Run(ctx, network.Enable(), network.SetBlockedURLs([]string{
 		"*.woff", "*.woff2", "*.ttf", "*.otf", "*.mp4", "*google-analytics*",
 	}))
 
 	for t := range tasks {
-		var buf []byte // 这里声明了外部变量
+		var buf []byte
 		tCtx, tCancel := context.WithTimeout(ctx, 45*time.Second)
 		
 		err := chromedp.Run(tCtx,
 			chromedp.Navigate(t.URL),
 			chromedp.WaitReady("body"),
-			chromedp.Sleep(1500*time.Millisecond),
+			chromedp.Sleep(1*time.Second), // Wait for lazy-loaded images
 			chromedp.Evaluate(CleanScript, nil),
 			chromedp.ActionFunc(func(ctx context.Context) error {
 				var err error
-				// 【修复点】：使用 = 而不是 :=，并显式声明 err
-				// 这样数据才会写入到外部的 buf 中
+				// Assign to outer 'buf'
 				buf, _, err = page.PrintToPDF().
-					WithPrintBackground(false).
+					WithPrintBackground(false). // Keep content images, remove background colors
 					WithPaperWidth(8.27).WithPaperHeight(11.69).
 					WithMarginTop(0.3).WithMarginBottom(0.3).
 					WithMarginLeft(0.3).WithMarginRight(0.3).
@@ -183,25 +213,25 @@ func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result,
 		tCancel()
 
 		if err != nil {
-			fmt.Printf("⚠️ 渲染失败: %s\n", t.URL)
+			fmt.Printf("⚠️ Render Failed: %s\n", t.URL)
 			continue
 		}
 
 		path := filepath.Join(OutDir, fmt.Sprintf("%03d.pdf", t.ID))
 		os.WriteFile(path, buf, 0644)
 		results <- Result{ID: t.ID, Path: path}
-		fmt.Printf("📄 [%d] 保存: %s\n", t.ID, t.URL)
+		fmt.Printf("📄 [%d] Saved: %s\n", t.ID, t.URL)
 	}
 }
 
 func mergePDFs(results []Result) {
 	if len(results) == 0 { return }
-	fmt.Println("📚 正在合并 PDF...")
+	fmt.Println("📚 Merging PDFs...")
 	var inFiles []string
 	for _, r := range results {
 		inFiles = append(inFiles, r.Path)
 	}
-	// 传入 nil 使用默认配置
+	// Pass nil config to use defaults
 	if err := api.MergeCreateFile(inFiles, FinalPDF, false, nil); err != nil {
 		log.Printf("Merge error: %v", err)
 	}
