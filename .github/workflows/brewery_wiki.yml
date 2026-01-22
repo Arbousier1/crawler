@@ -1,12 +1,15 @@
-name: Build The Brewing Project Wiki (V1 Compliant)
+name: Build The Brewing Project Wiki (Scraper)
 
 on:
   schedule:
     - cron: '0 3 * * *'
   workflow_dispatch: 
 
+permissions:
+  contents: read
+
 jobs:
-  build-tbp-kb:
+  build-kb:
     runs-on: ubuntu-latest
     
     steps:
@@ -16,8 +19,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24' # 匹配你当前的开发环境
+          go-version: '1.24'
           cache: true
+          # 假设你在该目录下执行 go mod tidy 后会生成 go.sum
+          cache-dependency-path: 'TheBrewingProject/go.sum'
 
       - name: Install PDF Tools
         run: |
@@ -25,18 +30,21 @@ jobs:
           sudo apt-get install -y pandoc fonts-wqy-zenhei python3-pip
           pip3 install weasyprint
 
-      - name: Execute Compliant Scraper
+      - name: Run Scraper
         working-directory: ./TheBrewingProject
         run: |
-          # 运行遵循官方准则的爬虫
+          # 初始化并安装 colly 依赖
+          if [ ! -f go.mod ]; then go mod init brewery-scraper; fi
+          go get github.com/gocolly/colly/v2
+          go mod tidy
           go run main.go
           
           if [ ! -s TheBrewingProject_Wiki.md ]; then
-            echo "错误: 抓取结果为空，请检查 API 连通性"
+            echo "错误: 抓取结果为空！"
             exit 1
           fi
 
-      - name: Generate PDF
+      - name: Convert to PDF
         working-directory: ./TheBrewingProject
         run: |
           pandoc TheBrewingProject_Wiki.md \
@@ -46,9 +54,10 @@ jobs:
             -V mainfont="WenQuanYi Zen Hei" \
             -V geometry:margin=0.8in
 
-      - name: Upload Encyclopedia
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Brewery-Official-Wiki
+          name: Brewery-Website-Wiki
           path: |
             TheBrewingProject/TheBrewingProject_Wiki.pdf
+            TheBrewingProject/TheBrewingProject_Wiki.md
