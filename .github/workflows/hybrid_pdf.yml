@@ -1,0 +1,48 @@
+name: Hybrid Wiki PDF Builder
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # --- 环境准备 ---
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Chrome & Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          pip install pymupdf
+
+      # --- 混合执行 ---
+      - name: Run Go Crawler
+        run: |
+          cd go_crawler
+          go mod init crawler && go mod tidy
+          go run main.go
+          mv metadata.json ../
+          mv temp_pdfs ../
+
+      - name: Run Python Finisher
+        run: |
+          python python_finisher/merge.py
+
+      # --- 产物上传 ---
+      - name: Upload Result
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hybrid-Wiki-PDF
+          path: Final_Wiki_Hybrid.pdf
