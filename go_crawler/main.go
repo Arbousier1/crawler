@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	// "log" // 已删除未使用的 log 包
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,7 +23,7 @@ const (
 	BaseURL       = "https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops"
 	OutDir        = "dist"
 	FinalPDF      = "MOMI_CustomCrops_Wiki.pdf"
-	// 稳定性核心：在 GitHub Actions 中建议设为 1 或 2，防止浏览器崩溃
+	// 稳定性核心：设为 1 或 2，防止浏览器崩溃
 	MaxConcurrent = 1 
 	UserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 )
@@ -223,7 +223,12 @@ func mergePDFs(results []Result) {
 	for _, r := range results { inFiles = append(inFiles, r.Path) }
 	conf := model.NewDefaultConfiguration()
 	conf.ValidationMode = model.ValidationRelaxed 
-	api.MergeCreateFile(inFiles, FinalPDF, false, conf)
+	
+	// 使用 fmt 而不是 log，避免 unused import 错误
+	if err := api.MergeCreateFile(inFiles, FinalPDF, false, conf); err != nil {
+		fmt.Printf("❌ 合并 PDF 失败: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func uniqueAndSort(slice []string) []string {
