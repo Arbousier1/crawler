@@ -3,253 +3,193 @@ package main
 import (
 	"context"
 	"fmt"
-	// "log" // 已删除未使用的 log 包
-	"net/url"
+	"log"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
+	md "github.com/JohannesKaufmann/html-to-markdown"
+	"github.com/PuerkitoBio/goquery"
 	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
-	"github.com/pdfcpu/pdfcpu/pkg/api"
-	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
 )
 
+// Config 配置项
 const (
-	BaseURL       = "https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops"
-	OutDir        = "dist"
-	FinalPDF      = "MOMI_CustomCrops_Wiki.pdf"
-	// 稳定性核心：设为 1 或 2，防止浏览器崩溃
-	MaxConcurrent = 1 
-	UserAgent     = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+	TargetURL    = "https://mo-mi.gitbook.io/xiaomomi-plugins/customcrops" // 目标入口
+	OutputDir    = "./knowledge_base"                                      // 保存目录
+	WaitSelector = "main"                                                  // GitBook 内容通常在 main 标签中
 )
 
 func main() {
-	start := time.Now()
-	os.RemoveAll(OutDir)
-	os.MkdirAll(OutDir, 0755)
+	// 1. 初始化输出目录
+	if err := os.MkdirAll(OutputDir, 0755); err != nil {
+		log.Fatal(err)
+	}
 
+	// 2. 配置 Chrome (Headless 模式)
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", "new"),
-		chromedp.Flag("no-sandbox", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
-		chromedp.Flag("disable-gpu", true),
-		chromedp.UserAgent(UserAgent),
+		chromedp.UserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+		chromedp.Flag("headless", true), // 如果想看浏览器运行，改为 false
+		chromedp.DisableGPU,
 	)
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 
-	fmt.Println("🔍 正在扫描 GitBook 目录结构...")
-	uniqueUrls := scanLinksDeep(allocCtx)
-	
-	if len(uniqueUrls) == 0 {
-		fmt.Println("❌ 错误：未能获取有效链接。")
-		os.Exit(1)
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	// 设置超时时间，防止脚本无限挂起
+	ctx, cancel = context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	log.Println("🚀 开始扫描目录结构...")
+
+	// 3. 获取所有侧边栏链接
+	links, err := fetchSidebarLinks(ctx, TargetURL)
+	if err != nil {
+		log.Fatalf("获取目录失败: %v", err)
 	}
 
-	fmt.Printf("✅ 发现 %d 个文档页面，开始串行稳定渲染...\n", len(uniqueUrls))
+	log.Printf("发现 %d 个页面，开始爬取内容...\n", len(links))
 
-	taskChan := make(chan Task, len(uniqueUrls))
-	resChan := make(chan Result, len(uniqueUrls))
-	var wg sync.WaitGroup
+	// 4. 遍历链接并爬取内容
+	converter := md.NewConverter("", true, nil)
 
-	for i := 0; i < MaxConcurrent; i++ {
-		wg.Add(1)
-		go worker(allocCtx, taskChan, resChan, &wg)
-	}
+	for i, link := range links {
+		// 简单的防封禁策略：休眠 1-3 秒
+		time.Sleep(2 * time.Second)
 
-	for i, u := range uniqueUrls {
-		taskChan <- Task{ID: i, URL: u}
-	}
-	close(taskChan)
-	wg.Wait()
-	close(resChan)
-
-	var results []Result
-	for r := range resChan {
-		results = append(results, r)
-	}
-	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
-
-	if len(results) == 0 {
-		fmt.Println("❌ 错误：所有页面渲染均失败，无法合并。")
-		os.Exit(1)
-	}
-
-	mergePDFs(results)
-	fmt.Printf("\n🏆 完成！成功渲染 %d/%d 页 | 耗时: %s\n", len(results), len(uniqueUrls), time.Since(start))
-}
-
-func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	for t := range tasks {
-		success := false
-		var buf []byte
+		log.Printf("[%d/%d] 处理: %s", i+1, len(links), link)
 		
-		// 自动重试机制：最多尝试 3 次
-		for attempt := 1; attempt <= 3; attempt++ {
-			if attempt > 1 {
-				fmt.Printf("🔄 [%d] 正在进行第 %d 次重试...\n", t.ID, attempt)
-				time.Sleep(2 * time.Second)
-			}
-
-			// 为每次渲染创建完全独立的 Context，防止互相干扰
-			ctx, cancel := chromedp.NewContext(parentCtx)
-			tCtx, tCancel := context.WithTimeout(ctx, 60*time.Second)
-			
-			err := chromedp.Run(tCtx,
-				network.Enable(),
-				chromedp.Navigate(t.URL),
-				// GitBook 加载较慢，等待 body 出现即可
-				chromedp.WaitReady("body"),
-				chromedp.Sleep(5*time.Second), // 留出足够时间给动态内容
-				chromedp.Evaluate(CleanScript, nil),
-				chromedp.ActionFunc(func(ctx context.Context) error {
-					var err error
-					buf, _, err = page.PrintToPDF().
-						WithPrintBackground(true).
-						WithPaperWidth(8.27).
-						WithPaperHeight(11.69).
-						Do(ctx)
-					return err
-				}),
-			)
-			tCancel()
-			cancel() // 渲染完立即释放浏览器 Tab 内存
-
-			if err == nil {
-				success = true
-				break
-			}
-			fmt.Printf("⚠️ [%d] 尝试 %d 失败: %v\n", t.ID, attempt, err)
-		}
-
-		if success {
-			path := filepath.Join(OutDir, fmt.Sprintf("%03d.pdf", t.ID))
-			os.WriteFile(path, buf, 0644)
-			results <- Result{ID: t.ID, Path: path}
-			fmt.Printf("📄 [%d] 渲染成功: %s\n", t.ID, t.URL)
-		} else {
-			fmt.Printf("❌ [%d] 最终渲染失败: %s\n", t.ID, t.URL)
-		}
-	}
-}
-
-func scanLinksDeep(ctx context.Context) []string {
-	// 扫描使用独立的 Context
-	sCtx, sCancel := chromedp.NewContext(ctx)
-	defer sCancel()
-	
-	visited := make(map[string]bool)
-	var links []string
-	queue := []string{BaseURL}
-	targetHost := "mo-mi.gitbook.io"
-
-	for len(queue) > 0 {
-		curr := queue[0]
-		queue = queue[1:]
-
-		u, _ := url.Parse(curr)
-		cleanURL := u.Scheme + "://" + u.Host + u.Path
-		cleanURL = strings.TrimSuffix(cleanURL, "/")
-
-		if visited[cleanURL] { continue }
-		visited[cleanURL] = true
-
-		fmt.Printf("🔗 正在扫描: %s\n", cleanURL)
-
-		var res []string
-		tCtx, tCancel := context.WithTimeout(sCtx, 30*time.Second)
-		err := chromedp.Run(tCtx, 
-			chromedp.Navigate(curr),
-			chromedp.WaitReady("body"),
-			chromedp.Sleep(3*time.Second),
-			chromedp.Evaluate(`
-				Array.from(document.querySelectorAll('a[href]'))
-					.map(a => a.href)
-			`, &res),
-		)
-		tCancel()
-
+		content, title, err := fetchPageContent(ctx, link)
 		if err != nil {
-			fmt.Printf("⚠️ 扫描页面出错 (跳过): %v\n", err)
+			log.Printf("❌ 失败 %s: %v", link, err)
 			continue
 		}
 
-		for _, l := range res {
-			parsed, err := url.Parse(l)
-			if err != nil { continue }
+		// 5. 转换为 Markdown
+		markdown, err := converter.ConvertString(content)
+		if err != nil {
+			log.Printf("⚠️ 转换 Markdown 失败: %v", err)
+			continue
+		}
 
-			if parsed.Host == targetHost && strings.Contains(parsed.Path, "customcrops") {
-				parsed.Fragment = ""
-				parsed.RawQuery = ""
-				full := strings.TrimSuffix(parsed.String(), "/")
+		// 添加原文链接到头部，方便追溯
+		finalMD := fmt.Sprintf("# %s\n\nSource: %s\n\n%s", title, link, markdown)
 
-				if !visited[full] {
-					links = append(links, full)
-					queue = append(queue, full)
+		// 6. 保存文件
+		filename := cleanFilename(title) + ".md"
+		savePath := filepath.Join(OutputDir, filename)
+		if err := os.WriteFile(savePath, []byte(finalMD), 0644); err != nil {
+			log.Printf("无法保存文件: %v", err)
+		} else {
+			log.Printf("✅ 已保存: %s", filename)
+		}
+	}
+	
+	log.Println("🎉 爬取完成！所有文件已保存至", OutputDir)
+}
+
+// fetchSidebarLinks 获取侧边栏的所有链接
+func fetchSidebarLinks(ctx context.Context, urlStr string) ([]string, error) {
+	var htmlContent string
+	err := chromedp.Run(ctx,
+		network.Enable(),
+		chromedp.Navigate(urlStr),
+		// 等待侧边栏加载，GitBook 的侧边栏通常在 nav 标签或者特定的 div 中
+		// 这里等待 main 加载，说明页面大体已经 ok
+		chromedp.WaitVisible("main", chromedp.ByQuery),
+		chromedp.OuterHTML("html", &htmlContent),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
+	if err != nil {
+		return nil, err
+	}
+
+	var links []string
+	seen := make(map[string]bool)
+
+	// GitBook 侧边栏链接通常在 nav 里面
+	doc.Find("nav a").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if exists && href != "" {
+			// 处理相对路径
+			if strings.HasPrefix(href, "/") {
+				// 拼接域名 (这里需要简单的 url parsing，为演示方便硬编码前缀逻辑)
+				// 实际 GitBook 往往是 subdomain.gitbook.io
+				// 注意：如果 href 是相对当前路径的，这里需要更复杂的 URL Resolve
+				// GitBook 通常生成的 href 是相对根目录的，或者是完整的
+				if !strings.HasPrefix(href, "http") {
+					baseURL := "https://mo-mi.gitbook.io" // 基础域名
+					href = baseURL + href
 				}
 			}
+			
+			// 只保留本站的链接，排除外部链接
+			if strings.Contains(href, "mo-mi.gitbook.io") && !seen[href] {
+				links = append(links, href)
+				seen[href] = true
+			}
 		}
-	}
-	return uniqueAndSort(links)
+	})
+
+	return links, nil
 }
 
-const CleanScript = `
-	(function() {
-		// 彻底移除干扰元素
-		const selectors = ['header', 'nav', '[role="navigation"]', '#feedback-buoy', 'footer', 'iframe'];
-		selectors.forEach(s => document.querySelectorAll(s).forEach(e => e.remove()));
+// fetchPageContent 获取单个页面的主要内容
+func fetchPageContent(ctx context.Context, urlStr string) (string, string, error) {
+	var htmlContent string
+	// 这里的超时控制单个页面的加载时间
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 
-		const main = document.querySelector('main');
-		if(main) {
-			main.style.width = '100%';
-			main.style.maxWidth = 'none';
-			main.style.margin = '0';
-			main.style.padding = '30px';
-		}
-		document.body.style.backgroundColor = 'white';
-	})();
-`
+	err := chromedp.Run(ctx,
+		chromedp.Navigate(urlStr),
+		chromedp.WaitVisible("main", chromedp.ByQuery), // 等待正文出现
+		chromedp.OuterHTML("html", &htmlContent),
+	)
+	if err != nil {
+		return "", "", err
+	}
 
-func mergePDFs(results []Result) {
-	var inFiles []string
-	for _, r := range results { inFiles = append(inFiles, r.Path) }
-	conf := model.NewDefaultConfiguration()
-	conf.ValidationMode = model.ValidationRelaxed 
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
+	if err != nil {
+		return "", "", err
+	}
+
+	// 获取标题
+	title := doc.Find("h1").First().Text()
+	if title == "" {
+		title = "Untitled"
+	}
+
+	// 获取正文 (GitBook 的正文通常在 main 标签里)
+	mainContent := doc.Find("main")
 	
-	// 使用 fmt 而不是 log，避免 unused import 错误
-	if err := api.MergeCreateFile(inFiles, FinalPDF, false, conf); err != nil {
-		fmt.Printf("❌ 合并 PDF 失败: %v\n", err)
-		os.Exit(1)
+	// 移除不需要的元素，保持语料干净
+	mainContent.Find("script, style, iframe, noscript, nav").Remove()
+	
+	// 获取 HTML 字符串
+	contentHtml, err := mainContent.Html()
+	if err != nil {
+		return "", title, err
 	}
+
+	return contentHtml, title, nil
 }
 
-func uniqueAndSort(slice []string) []string {
-	m := make(map[string]bool)
-	var list []string
-	for _, v := range slice {
-		if !m[v] && v != "" {
-			m[v] = true
-			list = append(list, v)
-		}
+// cleanFilename 清理文件名中的非法字符
+func cleanFilename(name string) string {
+	invalid := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|", "\n", "\t"}
+	for _, char := range invalid {
+		name = strings.ReplaceAll(name, char, "_")
 	}
-	sort.Strings(list)
-	return list
-}
-
-type Task struct {
-	ID  int
-	URL string
-}
-
-type Result struct {
-	ID   int
-	Path string
+	return strings.TrimSpace(name)
 }
