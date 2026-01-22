@@ -1,59 +1,38 @@
-name: MOMI Wiki Scraper (Markdown)
+name: Update GitBook Knowledge Base
 
 on:
-  workflow_dispatch: # 允许手动点击按钮触发
   schedule:
-    - cron: '0 2 * * 1' # 每周一自动更新
+    - cron: '0 2 * * *' # 每天凌晨 2 点运行
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
     steps:
-      - name: 📥 Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🐹 Setup Go
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.22'
 
-      # ⚠️ 注意：这里删除了 Install Chrome 的步骤
-      # Ubuntu-latest 环境已经内置了 Google Chrome，直接用即可
-
-      - name: 🏃 Run Scraper
+      - name: Install & Run
         run: |
-          # 1. 确保 go.mod 存在 (如果仓库里没有，这里自动生成)
-          if [ ! -f go.mod ]; then
-            echo "Initializing Go module..."
-            go mod init wiki-crawler
-            go get -u github.com/chromedp/chromedp
-            go get -u github.com/PuerkitoBio/goquery
-            go get -u github.com/JohannesKaufmann/html-to-markdown
-          else
-            echo "Tidying dependencies..."
-            go mod tidy
-          fi
-
-          # 2. 运行 Go 代码
-          echo "Starting extraction..."
+          go mod init customcrops-scraper || true
+          go get github.com/gocolly/colly/v2
+          go get github.com/JohannesKaufmann/html-to-markdown
+          
+          # 清理旧数据，防止死链残留
+          rm -rf knowledge_base/*.md
+          
           go run main.go
 
-      - name: 📦 Zip Knowledge Base
-        run: |
-          # 检查是否有输出
-          if [ -d "knowledge_base" ]; then
-            zip -r momi_wiki_knowledge.zip knowledge_base
-            echo "✅ Zipped successfully."
-          else
-            echo "❌ No knowledge_base directory found!"
-            exit 1
-          fi
-
-      - name: 📤 Upload Artifact
-        uses: actions/upload-artifact@v4
+      - name: Commit Changes
+        uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          name: MOMI-Wiki-Markdown
-          path: momi_wiki_knowledge.zip
-          retention-days: 90
+          commit_message: "docs: update knowledge base from GitBook"
+          file_pattern: 'knowledge_base/*.md'
