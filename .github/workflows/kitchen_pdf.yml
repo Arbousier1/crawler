@@ -1,0 +1,61 @@
+name: Kitchen Wiki to Artifact
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch: 
+
+permissions:
+  contents: read
+
+jobs:
+  build-kitchen-kb:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install PDF Tools & Fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc python3-pip fonts-wqy-zenhei
+          pip3 install weasyprint
+
+      - name: Run Crawler
+        # 切换到对应的子目录
+        working-directory: ./JiuWu-s_Kitchen
+        run: |
+          go mod tidy
+          go run main.go
+          
+          if [ ! -f kitchen_wiki_full.md ]; then
+            echo "错误: Markdown 文件未生成！"
+            exit 1
+          fi
+
+      - name: Convert to PDF
+        working-directory: ./JiuWu-s_Kitchen
+        run: |
+          pandoc kitchen_wiki_full.md \
+            -o kitchen_wiki_full.pdf \
+            --pdf-engine=weasyprint \
+            --toc \
+            --toc-depth=3 \
+            -V mainfont="WenQuanYi Zen Hei" \
+            -V geometry:margin=1in \
+            -V colorlinks=true
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Kitchen-Wiki-PDF
+          path: |
+            JiuWu-s_Kitchen/kitchen_wiki_full.pdf
+            JiuWu-s_Kitchen/kitchen_wiki_full.md
+          retention-days: 14
