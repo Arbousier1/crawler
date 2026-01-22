@@ -2,10 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/xml"
 	"fmt"
-	"io"
-	"net/http"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -22,27 +20,20 @@ import (
 
 const (
 	BaseURL       = "https://xiao-momi.github.io/craft-engine-wiki/"
-	SitemapURL    = "https://xiao-momi.github.io/craft-engine-wiki/sitemap.xml"
 	OutDir        = "dist"
-	FinalPDF      = "Wiki_Full_Coverage.pdf"
-	MaxConcurrent = 4
+	FinalPDF      = "Wiki_Full_Dump.pdf"
+	MaxConcurrent = 4 // 保持稳定
 )
 
-// DOM 净化脚本
+// 净化脚本：保留图片，删除导航
 const CleanScript = `
-	document.querySelectorAll('nav, .sidebar, .navbar, footer, script, iframe').forEach(e => e.remove());
+	document.querySelectorAll('nav, .sidebar, .navbar, footer, script, iframe, .theme-container > .navbar').forEach(e => e.remove());
 	document.querySelectorAll('details').forEach(e => e.open = true);
 	document.body.style.padding = '0px';
 	document.body.style.margin = '20px';
 	document.body.style.backgroundColor = 'white';
-`
-
-// 暴力展开菜单脚本 (用于保底爬取)
-const ExpandScript = `
-	// 尝试点击所有可能的展开按钮
-	document.querySelectorAll('.toggle, .arrow, button[aria-expanded="false"]').forEach(b => b.click());
-	// 滚动到底部触发懒加载
-	window.scrollTo(0, document.body.scrollHeight);
+	// 尝试移除 VuePress/VitePress 的遮罩
+	document.querySelectorAll('.sidebar-mask').forEach(e => e.remove());
 `
 
 type Task struct {
@@ -55,43 +46,37 @@ type Result struct {
 	Path string
 }
 
-// Sitemap 结构定义
-type UrlSet struct {
-	XMLName xml.Name `xml:"urlset"`
-	Urls    []Url    `xml:"url"`
-}
-type Url struct {
-	Loc string `xml:"loc"`
-}
-
 func main() {
 	start := time.Now()
 	os.RemoveAll(OutDir)
 	os.MkdirAll(OutDir, 0755)
 
+	// 1. 浏览器配置 (关键：设置大窗口)
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", "new"),
 		chromedp.Flag("disable-gpu", true),
 		chromedp.Flag("no-sandbox", true),
 		chromedp.Flag("disable-dev-shm-usage", true),
+		// 【关键修复】强制 1920x1080，防止侧边栏被折叠
+		chromedp.WindowSize(1920, 1080),
 	)
 
 	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
 	defer cancel()
 
-	// --- 核心改动：双重链接发现机制 ---
-	fmt.Println("🔍 正在尝试获取 Sitemap (最全方式)...")
-	urls := getLinksFromSitemap()
-
-	if len(urls) == 0 {
-		fmt.Println("⚠️ Sitemap 获取失败，切换到【暴力爬虫模式】...")
-		urls = scanLinksAggressive(allocCtx)
-	}
+	// 2. 深度递归扫描
+	fmt.Println("🕷️ 启动深度爬虫 (Breadth-First Search)...")
+	urls := crawlAllPages(allocCtx)
 	
+	// 再次去重，确保万无一失
 	uniqueUrls := uniqueAndSort(urls)
-	fmt.Printf("✅ 最终确认页面数量: %d 个 (覆盖率提升)\n", len(uniqueUrls))
+	fmt.Printf("✅ 最终捕获: %d 个唯一页面 (准备渲染)\n", len(uniqueUrls))
 
-	// 并发渲染
+	if len(uniqueUrls) == 0 {
+		log.Fatal("❌ 未找到任何页面，请检查 BaseURL 是否可访问")
+	}
+
+	// 3. 并发渲染
 	taskChan := make(chan Task, len(uniqueUrls))
 	resChan := make(chan Result, len(uniqueUrls))
 	var wg sync.WaitGroup
@@ -108,6 +93,7 @@ func main() {
 	wg.Wait()
 	close(resChan)
 
+	// 4. 合并
 	var results []Result
 	for r := range resChan {
 		results = append(results, r)
@@ -115,73 +101,76 @@ func main() {
 	sort.Slice(results, func(i, j int) bool { return results[i].ID < results[j].ID })
 
 	mergePDFs(results)
-	fmt.Printf("🏆 任务完成！耗时: %s | 文件: %s\n", time.Since(start), FinalPDF)
+	fmt.Printf("🏆 完成！耗时: %s | 文件: %s\n", time.Since(start), FinalPDF)
 	os.RemoveAll(OutDir)
 }
 
-// 策略 1: 从 Sitemap 获取 (100% 准确)
-func getLinksFromSitemap() []string {
-	resp, err := http.Get(SitemapURL)
-	if err != nil || resp.StatusCode != 200 {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	data, _ := io.ReadAll(resp.Body)
-	var urlSet UrlSet
-	if err := xml.Unmarshal(data, &urlSet); err != nil {
-		return nil
-	}
-
-	var links []string
-	for _, u := range urlSet.Urls {
-		// 过滤掉非 HTML 文件 (如 PDF, 图片)
-		if strings.HasSuffix(u.Loc, ".html") || strings.HasSuffix(u.Loc, "/") {
-			links = append(links, u.Loc)
-		}
-	}
-	return links
-}
-
-// 策略 2: 暴力爬取 (保底方案)
-func scanLinksAggressive(ctx context.Context) []string {
-	ctx, cancel := chromedp.NewContext(ctx)
+// crawlAllPages 实现了真正的 BFS (广度优先搜索)
+func crawlAllPages(rootCtx context.Context) []string {
+	// 创建一个独立的 browser context 用于爬取
+	ctx, cancel := chromedp.NewContext(rootCtx)
 	defer cancel()
 
-	var links []string
-	toVisit := []string{BaseURL}
-	visited := make(map[string]bool)
+	// 待爬队列
+	queue := []string{BaseURL}
+	// 已发现集合 (用于去重)
+	seen := make(map[string]bool)
+	seen[BaseURL] = true
+	// 结果列表
+	var results []string
 
-	for len(toVisit) > 0 {
-		curr := toVisit[0]
-		toVisit = toVisit[1:]
-		if visited[curr] { continue }
-		visited[curr] = true
-		links = append(links, curr)
+	// 限制最大深度防止死循环 (Wiki一般不超过5层，但这里按数量限制更安全)
+	// 或者只要队列不空就一直爬
+	for len(queue) > 0 {
+		// 取出队首
+		currentURL := queue[0]
+		queue = queue[1:]
+		
+		results = append(results, currentURL)
+		fmt.Printf("🔍 扫描中 [%d Found]: %s\n", len(results), currentURL)
 
-		var res []string
-		tCtx, tCancel := context.WithTimeout(ctx, 30*time.Second) // 增加扫描时间
-		chromedp.Run(tCtx,
-			chromedp.Navigate(curr),
-			chromedp.WaitReady("body"),
-			// 关键：暴力展开菜单 + 滚动页面
-			chromedp.Evaluate(ExpandScript, nil),
-			chromedp.Sleep(1*time.Second), // 等待展开动画
-			chromedp.Evaluate(`Array.from(document.querySelectorAll('a[href]')).map(a=>a.href)`, &res),
-		)
-		tCancel()
-
-		for _, l := range res {
-			u, err := url.Parse(l)
+		// 提取该页面上的所有新链接
+		newLinks := extractLinks(ctx, currentURL)
+		
+		for _, link := range newLinks {
+			// 规范化链接：去掉锚点，去掉尾部斜杠
+			u, err := url.Parse(link)
 			if err != nil { continue }
 			u.Fragment = ""
-			full := strings.TrimSuffix(u.String(), "/")
-			if strings.HasPrefix(full, BaseURL) && !visited[full] {
-				toVisit = append(toVisit, full)
+			normalizedLink := strings.TrimSuffix(u.String(), "/")
+
+			// 必须是站内链接，且未被发现过
+			if strings.HasPrefix(normalizedLink, BaseURL) && !seen[normalizedLink] {
+				seen[normalizedLink] = true
+				queue = append(queue, normalizedLink)
 			}
 		}
 	}
-	return links
+	return results
+}
+
+func extractLinks(ctx context.Context, targetURL string) []string {
+	// 设置超时，防止某个页面卡死
+	tCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	var res []string
+	err := chromedp.Run(tCtx,
+		chromedp.Navigate(targetURL),
+		// 等待侧边栏加载 (VuePress 常见的选择器)
+		chromedp.WaitReady("body"),
+		// 稍微睡一下，等 JS 渲染侧边栏
+		chromedp.Sleep(1*time.Second),
+		// 抓取所有链接
+		chromedp.Evaluate(`Array.from(document.querySelectorAll('a[href]')).map(a => a.href)`, &res),
+	)
+	
+	if err != nil {
+		// 超时或出错也不要 panic，直接返回空，继续下一个
+		fmt.Printf("⚠️ 无法扫描页面: %s (%v)\n", targetURL, err)
+		return []string{}
+	}
+	return res
 }
 
 func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result, wg *sync.WaitGroup) {
@@ -189,23 +178,23 @@ func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result,
 	ctx, cancel := chromedp.NewContext(parentCtx)
 	defer cancel()
 
+	// 拦截无用资源 (只拦截字体和视频，保留图片)
 	chromedp.Run(ctx, network.Enable(), network.SetBlockedURLs([]string{
-		"*.woff", "*.woff2", "*.ttf", "*.mp4", "*google-analytics*",
+		"*.woff", "*.woff2", "*.ttf", "*.otf", "*.mp4", "*google-analytics*",
 	}))
 
 	for t := range tasks {
 		var buf []byte
-		tCtx, tCancel := context.WithTimeout(ctx, 60*time.Second)
+		tCtx, tCancel := context.WithTimeout(ctx, 45*time.Second)
 		
 		err := chromedp.Run(tCtx,
 			chromedp.Navigate(t.URL),
 			chromedp.WaitReady("body"),
-			chromedp.Sleep(1500*time.Millisecond), // 稍微多等一下图片
+			chromedp.Sleep(1500*time.Millisecond), // 等图片
 			chromedp.Evaluate(CleanScript, nil),
 			chromedp.ActionFunc(func(ctx context.Context) error {
-				var err error
-				buf, _, err = page.PrintToPDF().
-					WithPrintBackground(false).
+				buf, _, err := page.PrintToPDF().
+					WithPrintBackground(false). // 不打印背景
 					WithPaperWidth(8.27).WithPaperHeight(11.69).
 					WithMarginTop(0.3).WithMarginBottom(0.3).
 					WithMarginLeft(0.3).WithMarginRight(0.3).
@@ -216,26 +205,27 @@ func worker(parentCtx context.Context, tasks <-chan Task, results chan<- Result,
 		tCancel()
 
 		if err != nil {
-			fmt.Printf("⚠️ Skip: %s\n", t.URL)
+			fmt.Printf("⚠️ 渲染失败: %s\n", t.URL)
 			continue
 		}
 
 		path := filepath.Join(OutDir, fmt.Sprintf("%03d.pdf", t.ID))
 		os.WriteFile(path, buf, 0644)
 		results <- Result{ID: t.ID, Path: path}
-		fmt.Printf("📄 [%d/%d] OK: %s\n", t.ID+1, cap(tasks), t.URL)
+		fmt.Printf("📄 [%d] 保存: %s\n", t.ID, t.URL)
 	}
 }
 
 func mergePDFs(results []Result) {
 	if len(results) == 0 { return }
-	fmt.Println("📚 Merging PDFs...")
+	fmt.Println("📚 正在合并 PDF...")
 	var inFiles []string
 	for _, r := range results {
 		inFiles = append(inFiles, r.Path)
 	}
+	// 传入 nil 使用默认配置
 	if err := api.MergeCreateFile(inFiles, FinalPDF, false, nil); err != nil {
-		fmt.Println("Merge error:", err)
+		log.Printf("Merge error: %v", err)
 	}
 }
 
