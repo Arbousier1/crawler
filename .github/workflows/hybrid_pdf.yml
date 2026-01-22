@@ -1,16 +1,12 @@
-name: AI-Optimized Wiki Builder
+name: Multimodal Wiki PDF Export
 
-on:
-  workflow_dispatch:
+on: workflow_dispatch
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 设置较长的超时，因为并发数降低了
-    timeout-minutes: 60 
-
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Go
@@ -18,43 +14,23 @@ jobs:
         with:
           go-version: '1.24'
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Tools
+      - name: Install Dependencies & Chrome
         run: |
           sudo apt-get update
-          sudo apt-get install -y google-chrome-stable ghostscript
-          pip install pymupdf
-
-      - name: Go Crawler (Low Memory Mode)
-        run: |
-          cd go_crawler
+          sudo apt-get install -y google-chrome-stable
+          
           rm -rf go.mod go.sum
-          go mod init wiki-crawler
+          go mod init wiki-multimodal
+          go get github.com/chromedp/chromedp
+          go get github.com/chromedp/cdproto/network
+          go get github.com/pdfcpu/pdfcpu/pkg/api
           go mod tidy
-          go run main.go
 
-      - name: Python Merge & Preliminary Clean
-        run: |
-          python python_finisher/merge.py
-
-      - name: Ghostscript Extreme AI Compression
-        run: |
-          # 极限压缩：下采样到 60dpi，删除所有非文字元数据
-          gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 \
-             -dPDFSETTINGS=/screen \
-             -dNOPAUSE -dQUIET -dBATCH \
-             -dColorImageDownsampleType=/Bicubic -dColorImageResolution=60 \
-             -dGrayImageDownsampleType=/Bicubic -dGrayImageResolution=60 \
-             -dMonoImageDownsampleType=/Bicubic -dMonoImageResolution=60 \
-             -sOutputFile=Wiki_AI_Final.pdf \
-             Wiki_Raw_Merged.pdf
+      - name: Run Multimodal Crawler
+        run: go run go_crawler/main.go
 
       - name: Upload Final PDF
         uses: actions/upload-artifact@v4
         with:
-          name: AI-Wiki-Data
-          path: Wiki_AI_Final.pdf
+          name: Wiki-Multimodal-PDF
+          path: Wiki_Multimodal_AI.pdf
