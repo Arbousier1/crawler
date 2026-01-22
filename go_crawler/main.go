@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	BaseURL       = "https://xiao-momi.github.io/craft-engine-wiki/"
+	BaseURL       = "https://momi.gtemc.cn/customcrops"
 	OutDir        = "dist"
 	FinalPDF      = "Wiki_Multimodal_AI.pdf"
 	// 并发数：因为要下载图片，内存压力变大，GitHub Action 建议保守点设为 3-4
