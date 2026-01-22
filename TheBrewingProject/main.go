@@ -1,21 +1,22 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
-	"regexp"
-	"strings"
 	"time"
-
-	"github.com/PuerkitoBio/goquery"
-	md "github.com/JohannesKaufmann/html-to-markdown"
-	"github.com/gocolly/colly/v2"
 )
 
-// 清理无效锚点，防止 PDF 报错
-func cleanInternalLinks(content string) string {
-	re := regexp.MustCompile(`\[([^\]]+)\]\(#[^\)]+\)`)
-	return re.ReplaceAllString(content, "$1")
+// Hangar API 响应结构
+type PageInfo struct {
+	Name string `json:"name"`
+	Slug string `json:"slug"`
+}
+
+type PageContent struct {
+	Markdown string `json:"markdown"`
 }
 
 func main() {
@@ -25,73 +26,52 @@ func main() {
 
 	// 写入元数据
 	f.WriteString("---\n")
-	f.WriteString("title: The Brewing Project 官方 Wiki 百科\n")
-	f.WriteString("author: 艾尔岚 (Ellan) 开发组\n")
+	f.WriteString("title: The Brewing Project 官方 Wiki (API 集成版)\n")
+	f.WriteString("author: 艾尔岚 (Ellan) 开发助手\n")
 	f.WriteString(fmt.Sprintf("date: %s\n", time.Now().Format("2006-01-02")))
 	f.WriteString("toc: true\n")
 	f.WriteString("lang: zh-CN\n")
 	f.WriteString("---\n\n")
 
-	baseURL := "https://hangar.papermc.io"
-	// Hangar 页面内容通常在这个路径前缀下
-	projectPath := "/BreweryTeam/TheBrewingProject/pages"
+	project := "BreweryTeam/TheBrewingProject"
+	client := &http.Client{Timeout: 30 * time.Second}
 
-	visited := make(map[string]bool)
-	c := colly.NewCollector(
-		colly.AllowedDomains("hangar.papermc.io"),
-		// 模拟真实浏览器，防止被 Hangar 的防火墙拦截返回空页面
-		colly.UserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
-	)
+	// 1. 获取所有 Wiki 页面列表
+	fmt.Println("正在从 API 获取页面列表...")
+	listURL := fmt.Sprintf("https://hangar.papermc.io/api/internal/projects/%s/pages", project)
+	resp, err := client.Get(listURL)
+	if err != nil || resp.StatusCode != 200 {
+		fmt.Printf("无法访问 API: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
 
-	converter := md.NewConverter("", true, nil)
+	var pages []PageInfo
+	json.NewDecoder(resp.Body).Decode(&pages)
 
-	// 核心逻辑：提取 Hangar 的 Wiki 内容
-	// Hangar 的文档主要包裹在 .project-page 或 .markdown-content 中
-	c.OnHTML(".project-page, .markdown-content, .markdown-body", func(e *colly.HTMLElement) {
-		url := e.Request.URL.String()
-		if visited[url] { return }
-		visited[url] = true
-
-		// 提取标题
-		title := e.DOM.Find("h1").First().Text()
-		if title == "" {
-			parts := strings.Split(strings.TrimSuffix(url, "/"), "/")
-			title = parts[len(parts)-1]
-		}
+	// 2. 遍历并获取每个页面的原始 Markdown
+	for _, page := range pages {
+		fmt.Printf("正在抓取页面: %s\n", page.Name)
 		
-		fmt.Printf("成功抓取页面: %s\n", title)
-
-		// 修复相对图片路径
-		e.DOM.Find("img").Each(func(i int, s *goquery.Selection) {
-			imgSrc, _ := s.Attr("src")
-			if strings.HasPrefix(imgSrc, "/") {
-				s.SetAttr("src", baseURL+imgSrc)
-			}
-		})
-
-		html, _ := e.DOM.Html()
-		markdown, _ := converter.ConvertString(html)
-		finalMarkdown := cleanInternalLinks(markdown)
-
-		f.WriteString(fmt.Sprintf("# %s\n\n", title))
-		f.WriteString(fmt.Sprintf("> 来源: %s\n\n", url))
-		f.WriteString(finalMarkdown)
-		f.WriteString("\n\n\\newpage\n\n")
-	})
-
-	// 关键逻辑：寻找导航栏中的所有子页面链接
-	c.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		link := e.Attr("href")
-		// 只要链接包含项目路径，就尝试去访问
-		if strings.Contains(link, projectPath) && !strings.Contains(link, "#") {
-			fullLink := e.Request.AbsoluteURL(link)
-			if !visited[fullLink] {
-				e.Request.Visit(fullLink)
-			}
+		// 构造页面内容的 API 链接
+		contentURL := fmt.Sprintf("https://hangar.papermc.io/api/internal/pages/page/%s/%s", project, page.Slug)
+		cResp, cErr := client.Get(contentURL)
+		if cErr != nil || cResp.StatusCode != 200 {
+			continue
 		}
-	})
 
-	fmt.Println("🚀 正在深度爬取 Hangar Wiki...")
-	c.Visit("https://hangar.papermc.io/BreweryTeam/TheBrewingProject/pages/Wiki")
-	c.Wait()
+		var content PageContent
+		json.NewDecoder(cResp.Body).Decode(&content)
+		cResp.Body.Close()
+
+		// 3. 写入文件
+		f.WriteString(fmt.Sprintf("# %s\n\n", page.Name))
+		f.WriteString(content.Markdown)
+		f.WriteString("\n\n\\newpage\n\n")
+		
+		// 稍微延迟，避免被 API 限制频率
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	fmt.Println("✨ 抓取完成！已生成完整的 Markdown。")
 }
