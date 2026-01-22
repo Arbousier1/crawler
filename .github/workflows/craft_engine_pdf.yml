@@ -1,62 +1,81 @@
-name: CraftEngine Wiki to PDF
+name: Build Minecraft Dev Encyclopedia (Cached)
 
 on:
   schedule:
-    - cron: '0 2 * * *'
+    - cron: '0 3 * * *'
   workflow_dispatch: 
 
 permissions:
   contents: read
 
 jobs:
-  build-craft-engine-kb:
+  build:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      # 1. 设置 Go 环境并开启内置缓存
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          # 开启缓存后，setup-go 会自动根据 go.sum 的哈希值缓存依赖
+          cache: true
+          # 如果你的 go.mod 不在根目录，请指定路径，例如 'customcrops/go.sum'
+          cache-dependency-path: 'go.sum' 
 
+      # 2. 设置 Python 环境并开启 Pip 缓存
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+          # 自动缓存 ~/.cache/pip
+          cache: 'pip'
+
+      # 3. 安装系统级工具和 Python 依赖
       - name: Install PDF Tools & Fonts
         run: |
           sudo apt-get update
-          sudo apt-get install -y pandoc python3-pip fonts-wqy-zenhei
-          pip3 install weasyprint
+          # 注意：APT 软件包通常不建议缓存，因为安装速度极快且缓存同步可能更慢
+          sudo apt-get install -y pandoc fonts-wqy-zenhei
+          # 这一步会命中上一步设置的 pip 缓存
+          pip install weasyprint
 
-      - name: Run Crawler
-        working-directory: ./craft-engine
+      # 4. 运行大师级爬虫
+      - name: Generate Encyclopedia
         run: |
-          # 自动初始化并整理依赖
-          if [ ! -f go.mod ]; then go mod init craft-engine-scraper; fi
+          # 如果没有 go.mod 则初始化，否则直接整理
+          if [ ! -f go.mod ]; then
+            go mod init minecraft-kb
+          fi
           go mod tidy
           go run main.go
           
-          if [ ! -f craft_engine_wiki.md ]; then
-            echo "错误: Markdown 文件未生成！"
+          if [ ! -f Minecraft_Dev_Encyclopedia.md ]; then
+            echo "Error: Markdown was not generated!"
             exit 1
           fi
 
+      # 5. 转换为 PDF
       - name: Convert to PDF
-        working-directory: ./craft-engine
         run: |
-          pandoc craft_engine_wiki.md \
-            -o craft_engine_wiki.pdf \
+          pandoc Minecraft_Dev_Encyclopedia.md \
+            -o Minecraft_Dev_Encyclopedia.pdf \
             --pdf-engine=weasyprint \
             --toc \
             --toc-depth=3 \
             -V mainfont="WenQuanYi Zen Hei" \
-            -V geometry:margin=1in \
-            -V colorlinks=true
+            -V geometry:margin=0.8in \
+            -V colorlinks=true \
+            --metadata=title:"Minecraft 开发百科全书"
 
+      # 6. 上传产物
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: CraftEngine-Wiki-PDF
+          name: Minecraft-Encyclopedia
           path: |
-            craft-engine/craft_engine_wiki.pdf
-            craft-engine/craft_engine_wiki.md
+            Minecraft_Dev_Encyclopedia.pdf
+            Minecraft_Dev_Encyclopedia.md
           retention-days: 14
