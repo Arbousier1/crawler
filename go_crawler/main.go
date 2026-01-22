@@ -1,82 +1,50 @@
-package main
+name: Hybrid Wiki PDF Export
 
-import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
+on:
+  workflow_dispatch: # 支持手动点击按钮触发
 
-	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/chromedp"
-)
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-const BaseURL = "https://xiao-momi.github.io/craft-engine-wiki/"
-const OutDir = "temp_pdfs"
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
 
-type PageMeta struct {
-	ID    int    `json:"id"`
-	Title string `json:"title"`
-	URL   string `json:"url"`
-	Path  string `json:"path"`
-}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-func main() {
-	os.MkdirAll(OutDir, 0755)
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		chromedp.Flag("headless", "new"),
-		chromedp.Flag("no-sandbox", true),
-	)
-	allocCtx, cancel := chromedp.NewExecAllocator(context.Background(), opts...)
-	defer cancel()
+      - name: Install Chrome and Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+          pip install -r python_finisher/requirements.txt
 
-	// 1. 扫描链接 (简单演示，实际可用递归)
-	urls := []string{BaseURL} // 实际生产中建议加入递归扫描逻辑
-	
-	// 2. 并发抓取
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var results []PageMeta
-	sem := make(chan struct{}, 5) // 限制并发
+      - name: Execute Go Crawler
+        run: |
+          cd go_crawler
+          # 自动解决 go.mod 和 go.sum 依赖问题
+          rm -f go.mod go.sum
+          go mod init wiki-crawler
+          go get github.com/chromedp/chromedp
+          go get github.com/chromedp/cdproto/page
+          go mod tidy
+          go run main.go
 
-	for i, u := range urls {
-		wg.Add(1)
-		go func(idx int, targetURL string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+      - name: Execute Python Finisher
+        run: |
+          # Go 运行后会在根目录产出 metadata.json 和 temp_pdfs 文件夹
+          python python_finisher/merge.py
 
-			ctx, _ := chromedp.NewContext(allocCtx)
-			var title string
-			var buf []byte
-			
-			chromedp.Run(ctx,
-				chromedp.Navigate(targetURL),
-				chromedp.WaitReady("body"),
-				chromedp.Title(&title),
-				chromedp.ActionFunc(func(ctx context.Context) error {
-					var err error
-					buf, _, err = page.PrintToPDF().WithPrintBackground(true).Do(ctx)
-					return err
-				}),
-			)
-
-			fileName := fmt.Sprintf("page_%03d.pdf", idx)
-			filePath := filepath.Join(OutDir, fileName)
-			os.WriteFile(filePath, buf, 0644)
-
-			mu.Lock()
-			results = append(results, PageMeta{ID: idx, Title: title, URL: targetURL, Path: filePath})
-			mu.Unlock()
-			fmt.Printf("Done: %s\n", targetURL)
-		}(i, u)
-	}
-	wg.Wait()
-
-	// 保存元数据供 Python 使用
-	metaJson, _ := json.MarshalIndent(results, "", "  ")
-	os.WriteFile("metadata.json", metaJson, 0644)
-}
+      - name: Upload Final PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wiki-Perfect-PDF
+          path: Craft_Engine_Wiki_Perfect.pdf

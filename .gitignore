@@ -1,0 +1,5 @@
+temp_pdfs/
+metadata.json
+*.pdf
+go_crawler/go.mod
+go_crawler/go.sum

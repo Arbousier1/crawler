@@ -1,16 +1,16 @@
-name: Hybrid Wiki PDF Builder
+name: Hybrid Wiki PDF Export
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 支持手动点击按钮触发
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      # --- 环境准备 ---
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -21,28 +21,30 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Chrome & Dependencies
+      - name: Install Chrome and Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y google-chrome-stable
-          pip install pymupdf
+          pip install -r python_finisher/requirements.txt
 
-      # --- 混合执行 ---
-      - name: Run Go Crawler
+      - name: Execute Go Crawler
         run: |
           cd go_crawler
-          go mod init crawler && go mod tidy
+          # 自动解决 go.mod 和 go.sum 依赖问题
+          rm -f go.mod go.sum
+          go mod init wiki-crawler
+          go get github.com/chromedp/chromedp
+          go get github.com/chromedp/cdproto/page
+          go mod tidy
           go run main.go
-          mv metadata.json ../
-          mv temp_pdfs ../
 
-      - name: Run Python Finisher
+      - name: Execute Python Finisher
         run: |
+          # Go 运行后会在根目录产出 metadata.json 和 temp_pdfs 文件夹
           python python_finisher/merge.py
 
-      # --- 产物上传 ---
-      - name: Upload Result
+      - name: Upload Final PDF
         uses: actions/upload-artifact@v4
         with:
-          name: Hybrid-Wiki-PDF
-          path: Final_Wiki_Hybrid.pdf
+          name: Wiki-Perfect-PDF
+          path: Craft_Engine_Wiki_Perfect.pdf
