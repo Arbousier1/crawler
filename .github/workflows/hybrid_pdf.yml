@@ -17,7 +17,7 @@ jobs:
       - name: 🐹 Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
 
       # ⚠️ 注意：这里删除了 Install Chrome 的步骤
       # Ubuntu-latest 环境已经内置了 Google Chrome，直接用即可
